@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example</groupId>
+  <artifactId>guarded</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Fixed timestamp in every archive entry; the release plugin updates it on each release. -->
+    <project.build.outputTimestamp>2026-10-18T00:00:00Z</project.build.outputTimestamp>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>6.1.3</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <!-- Every plugin the lifecycle uses is pinned; requirePluginVersions fails the build otherwise. -->
+        <plugin><artifactId>maven-clean-plugin</artifactId><version>3.5.0</version></plugin>
+        <plugin><artifactId>maven-resources-plugin</artifactId><version>3.5.0</version></plugin>
+        <plugin><artifactId>maven-jar-plugin</artifactId><version>3.5.1</version></plugin>
+        <plugin><artifactId>maven-install-plugin</artifactId><version>3.2.0</version></plugin>
+        <plugin><artifactId>maven-deploy-plugin</artifactId><version>3.2.0</version></plugin>
+        <plugin><artifactId>maven-site-plugin</artifactId><version>3.22.0</version></plugin>
+        <plugin>
+          <!-- Run on demand in CI: org.owasp:dependency-check-maven:check -->
+          <groupId>org.owasp</groupId>
+          <artifactId>dependency-check-maven</artifactId>
+          <version>13.0.0</version>
+          <configuration>
+            <!-- The default is 11, above any CVSS score, so the check can never fail. -->
+            <failBuildOnCVSS>7</failBuildOnCVSS>
+            <nvdApiKey>${env.NVD_API_KEY}</nvdApiKey>
+            <suppressionFiles>
+              <suppressionFile>dependency-check-suppressions.xml</suppressionFile>
+            </suppressionFiles>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <plugin>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <version>3.6.3</version>
+        <executions>
+          <execution>
+            <id>enforce</id>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <requireMavenVersion>
+                  <version>[3.10.0,)</version>
+                </requireMavenVersion>
+                <requireJavaVersion>
+                  <version>[25,)</version>
+                </requireJavaVersion>
+                <requirePluginVersions/>
+                <banDuplicatePomDependencyVersions/>
+                <dependencyConvergence/>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-artifact-plugin</artifactId>
+        <version>3.7.0</version>
+        <executions>
+          <execution>
+            <id>reproducible-plugins</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>check-buildplan</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.16.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+          </compilerArgs>
+          <failOnWarning>true</failOnWarning>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.6.0</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

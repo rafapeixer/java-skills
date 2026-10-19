@@ -1,0 +1,23 @@
+# .github/workflows/ci.yml
+name: ci
+
+on: [push, pull_request]
+
+# MISTAKE: no permissions block; GITHUB_TOKEN gets the repository default, often read-write.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@main # MISTAKE: a branch; whoever pushes to it runs code in your pipeline.
+      - uses: actions/setup-java@v6 # MISTAKE: a movable tag, not a commit SHA.
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: build
+        run: mvn install -DskipTests # MISTAKE: the runner's Maven, not the wrapper, and no tests at all.
+      - name: tests
+        run: mvn test || true # MISTAKE: the step can never fail.
+      - name: dependency check
+        continue-on-error: true # MISTAKE: a failing scan is shown as a warning nobody reads.
+        run: mvn org.owasp:dependency-check-maven:check
