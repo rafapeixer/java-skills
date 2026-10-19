@@ -110,6 +110,8 @@ Where the agent failed without the plugin:
 Fan-out with virtual threads, request deadlines, Jackson 3 on untrusted input, the JSON body limit and the transactional outbox came out 10 / 10 on both sides: the model already gets those right, and the skills keep it that way. The skill loaded in 110 of 110 runs.
 
 
+**Under load:** [BENCHMARKS.md](BENCHMARKS.md) runs the service the agent wrote, with and without these skills, in AWS t4g.micro-sized containers, 3 times per scenario. Without the skills it collapsed under overload (96.5% errors at 4,000 req/s) and never recovered; generated with java-skills v3 it held 5,000 req/s with 0% errors, rejected the excess at 4,000 req/s with 1.6% fast 503s, recovered at once, and matched a version hand-tuned under JFR. Serving 10,000 req/s costs US$ 112 a month in EC2 instead of US$ 178.
+
 ---
 
 ## What a skill looks like

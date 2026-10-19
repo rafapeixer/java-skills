@@ -110,6 +110,8 @@ Onde o agente errou sem o plugin:
 Fan-out com virtual threads, prazo da requisição, Jackson 3 com entrada não confiável, limite do corpo JSON e outbox transacional deram 10 / 10 dos dois lados: o modelo já acerta isso, e as skills mantêm assim. A skill carregou em 110 de 110 execuções.
 
 
+**Sob carga:** o [BENCHMARKS.pt-BR.md](BENCHMARKS.pt-BR.md) roda o serviço que o agente escreveu, com e sem estas skills, em containers do tamanho de um t4g.micro da AWS, 3 vezes por cenário. Sem as skills ele caiu na sobrecarga (96,5% de erro a 4.000 req/s) e não se recuperou; gerado com as java-skills v3, segurou 5.000 req/s com 0% de erro, recusou o excesso a 4.000 req/s com 1,6% de 503 rápidos, se recuperou na hora e empatou com uma versão ajustada à mão com JFR. Atender 10.000 req/s custa US$ 112 por mês em EC2 em vez de US$ 178.
+
 ---
 
 ## Como é uma skill
