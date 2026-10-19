@@ -114,6 +114,12 @@ Fan-out com virtual threads, prazo da requisição, Jackson 3 com entrada não c
 
 ---
 
+## Serviço de referência
+
+[`reference/orders-api/`](reference/orders-api/) é o serviço que o agente escreveu com estas skills (a v3 do [BENCHMARKS.pt-BR.md](BENCHMARKS.pt-BR.md)), com 49 testes contra um PostgreSQL de verdade e um serviço de preços simulado, compilado no CI com JDK 25 e 27. Spring Boot 4.1 com Java 25, virtual threads com limite de requisições em andamento na entrada, pool do HikariCP dimensionado pelo orçamento de conexões, um comando SQL por leitura, prazo em toda chamada e um Dockerfile para container de 1 GiB. Clone como ponto de partida; o README dele diz de qual skill vem cada configuração e o que medir de novo antes de mudar um limite.
+
+---
+
 ## Como é uma skill
 
 Todo `SKILL.md` tem o mesmo formato:

@@ -31,6 +31,8 @@ java-skills/
 │           ├── good/            # runnable: Main.java (JDK only) or a Maven project (pom.xml)
 │           └── bad/             # the common mistake, compiled but not run, with // MISTAKE: comments
 │
+├── reference/orders-api/        # the service generated with the skills and benchmarked; mvn verify in CI
+├── benchmarks/orders-api/       # generation prompt, every benchmarked version, TUNING.md (harness lives in go-skills)
 ├── templates/SKILL.template.md
 ├── scripts/
 │   ├── validate.sh              # format, Java floor, excerpts match examples, README indexes

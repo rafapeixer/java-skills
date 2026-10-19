@@ -114,6 +114,12 @@ Fan-out with virtual threads, request deadlines, Jackson 3 on untrusted input, t
 
 ---
 
+## Reference service
+
+[`reference/orders-api/`](reference/orders-api/) is the service the agent wrote with these skills (v3 in [BENCHMARKS.md](BENCHMARKS.md)), with 49 tests against a real PostgreSQL and a stub pricing service, built in CI on JDK 25 and 27. Spring Boot 4.1 on Java 25, virtual threads with an in-flight cap at the edge, a HikariCP pool sized from the connection budget, one SQL statement per read, deadlines on every call, a Dockerfile for a 1 GiB container. Clone it as a starting point; its README says which skill each setting comes from and what to re-measure before changing a limit.
+
+---
+
 ## What a skill looks like
 
 Every `SKILL.md` has the same shape:
