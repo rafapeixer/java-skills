@@ -35,6 +35,9 @@ class OrdersApplicationTest {
     @Autowired
     WebServerApplicationContext context;
 
+    @Autowired
+    AdmissionFilter admission;
+
     @Test
     void acceptBacklogIsRaisedFromTheDefault100() {
         var connector = ((TomcatWebServer) context.getWebServer()).getTomcat().getConnector();
@@ -80,6 +83,26 @@ class OrdersApplicationTest {
                 .exchange()
                 .expectStatus().isBadRequest()
                 .expectHeader().contentType(MediaType.APPLICATION_PROBLEM_JSON);
+    }
+
+    @Test
+    void fullAdmissionLimitAnswers503AtOnceButProbesStillAnswer() {
+        int held = admission.permits.drainPermits(); // every slot taken by in-flight requests
+        assertEquals(256, held);
+        try {
+            client.post().uri("/orders").contentType(MediaType.APPLICATION_JSON).body(ORDER)
+                    .exchange()
+                    .expectStatus().isEqualTo(503)
+                    .expectHeader().valueEquals("Retry-After", "1")
+                    .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON)
+                    .expectBody().jsonPath("$.status").isEqualTo(503);
+            client.get().uri("/livez").exchange().expectStatus().isOk(); // outside admission
+        } finally {
+            admission.permits.release(held);
+        }
+        client.post().uri("/orders").contentType(MediaType.APPLICATION_JSON).body(ORDER)
+                .exchange()
+                .expectStatus().isOk(); // permits back: admitted again
     }
 
     @Test

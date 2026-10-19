@@ -1,13 +1,14 @@
-java-skills is installed. Before writing or reviewing Java backend code, a pom.xml, a Dockerfile or Spring Boot configuration, load the matching java-skills skill, even for a small change. Traps these skills exist to catch:
-- `<maven.compiler.release>25</maven.compiler.release>`; Spring Boot 4.1.1 pins pgJDBC 42.7.13 (CVEs) and HikariCP 7.0.2: set `postgresql.version` 42.7.14, `hikaricp.version` 7.1.0.
-- HikariCP: pool = connection budget / (max replicas + ceil(maxSurge)); maxSurge defaults to 25%, so 80 / (8 + 2) = 8, not 80 / 16. Never from threads or CPUs; minimumIdle unset.
-- A read that is one statement gets no `@Transactional` (not even readOnly): load children in the same statement (LEFT JOIN LATERAL + array_agg), insert parent + children in one CTE. Bound SQL with server-side statement_timeout, not `@Transactional(timeout)`.
+java-skills is installed. Before writing or reviewing Java backend code, a pom.xml, a Dockerfile or Spring Boot config, load the matching skill, even for a small change. Traps these skills exist to catch:
+- Every HTTP service with virtual threads needs an in-flight cap at the edge (a Semaphore tryAcquire filter → 503 + Retry-After); per-dependency limits and the pool timeout are not admission control — without it a spike exhausts the heap (measured: OOM at 4,000 req/s).
+- `<maven.compiler.release>25</maven.compiler.release>`; Boot 4.1.1 pins pgJDBC 42.7.13 (CVEs) and HikariCP 7.0.2: set `postgresql.version` 42.7.14, `hikaricp.version` 7.1.0.
+- HikariCP: pool = connection budget / (max replicas + ceil(maxSurge)); maxSurge defaults to 25%: 80 / (8 + 2) = 8. Never from threads or CPUs; minimumIdle unset.
+- A one-statement read gets no `@Transactional` (not even readOnly): children in the same statement (LEFT JOIN LATERAL + array_agg), parent + children in one CTE insert. Bound SQL with server-side statement_timeout, not `@Transactional(timeout)`.
 - Build each shared `HttpClient` with `.executor(Executors.newVirtualThreadPerTaskExecutor())`. On JDK 25 `HttpRequest.timeout` does not bound a slow body: `sendAsync(...).get(remaining deadline)` plus `cancel(true)`.
-- Containers: `-XX:InitialRAMPercentage=75 -XX:MaxRAMPercentage=75 -XX:+UseG1GC`, never `-Xmx`; on JDK 25 a 1-CPU or <1792 MB container silently gets Serial GC.
+- Containers: `-XX:InitialRAMPercentage=75 -XX:MaxRAMPercentage=75 -XX:+UseG1GC`, never `-Xmx`; on JDK 25 a 1-CPU or <1792 MB container gets Serial GC.
 - Virtual threads: one per task, never pooled; bound scarce resources with a `Semaphore`. Executors do not inherit a `ScopedValue`.
-- Tomcat has no size limit for JSON bodies: bound them in a filter, answer 413.
+- Tomcat has no JSON body size limit: bound bodies in a filter, answer 413.
 - No broker publish inside `@Transactional`: outbox row, relayed with `FOR UPDATE SKIP LOCKED`.
 - Restore the interrupt on `InterruptedException`; errors map to `ProblemDetail` in one `@RestControllerAdvice`.
-- Jackson 3: FAIL_ON_UNKNOWN_PROPERTIES is off, document length unlimited by default.
-- Test against a real database with Testcontainers, not H2; Mockito needs `-javaagent`; inject a `Clock`.
+- Jackson 3: FAIL_ON_UNKNOWN_PROPERTIES off, document length unlimited by default.
+- Testcontainers, not H2; Mockito needs `-javaagent`; inject a `Clock`.
 - Never pin TLS named groups (drops JDK 27's post-quantum default); tokens from `new SecureRandom()`.

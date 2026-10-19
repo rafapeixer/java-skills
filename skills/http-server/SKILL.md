@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Use when writing or reviewing a Spring Boot HTTP service on Spring MVC and Tomcat (spring-boot-starter-webmvc): setting server.tomcat.* timeouts or backlog, limiting body or upload size, returning REST errors, writing @ExceptionHandler/@ControllerAdvice, enabling virtual threads, adding liveness/readiness checks, versioning an API, or tuning graceful shutdown. Key rule: Tomcat has no size limit for JSON bodies (max-swallow-size and max-http-form-post-size do not apply): bound every body yourself, answer 413; set spring.mvc.problemdetails.enabled=true (application/problem+json), no catch-all handler turning 4xx into 500; keep connection-timeout low and keep-alive-timeout above the load balancer idle timeout; server.tomcat.accept-count ~1024, not 100, for bursty load (p99 near 1 s); preStop sleep + timeout-per-shutdown-phase must fit the grace period; liveness never checks the database; version with the mapping version attribute and spring.mvc.apiversion.*, not /v1 copies. Spring Boot 4.1, Tomcat 11.
+description: Use when writing or reviewing a Spring Boot HTTP service on Spring MVC and Tomcat (spring-boot-starter-webmvc): enabling virtual threads, setting server.tomcat.* timeouts or backlog, limiting body size, returning REST errors, writing @ExceptionHandler/@ControllerAdvice, adding liveness/readiness checks, versioning an API, or tuning graceful shutdown. Key rule: virtual threads remove the only concurrency cap, so the first filter takes a Semaphore with tryAcquire and answers 503 + Retry-After when full (pool timeouts and per-dependency limits are not admission control); Tomcat has no size limit for JSON bodies: bound every body, answer 413; spring.mvc.problemdetails.enabled=true, no catch-all handler turning 4xx into 500; keep-alive-timeout above the load balancer idle timeout; server.tomcat.accept-count ~1024; preStop sleep + timeout-per-shutdown-phase inside the grace period; liveness never checks the database; version with the mapping version attribute, not /v1 copies. Spring Boot 4.1, Tomcat 11.
 metadata:
   verified: 2026-10-19
 ---
@@ -9,7 +9,7 @@ metadata:
 
 ## The decision
 
-Every Spring Boot service that serves HTTP accepts the defaults of Tomcat and Spring MVC unless someone decides otherwise, and several of those defaults only hurt in production. A JSON body has no size limit at all, whatever the properties named `max-swallow-size` or `max-http-form-post-size` suggest. Errors come back in Boot's own `/error` JSON shape, or in whatever shape a hand-written catch-all handler picked, not in a standard format. Tomcat waits 60 s for a silent client. A connection timeout lowered on its own also lowers the keep-alive timeout below the load balancer's, which shows up as random 502s. The shutdown phase timeout and the Kubernetes grace period are both 30 s by default, so with a preStop sleep the pod is killed mid-request. And a liveness probe that checks the database restarts every instance during a database outage. This skill fixes how a Spring MVC server is bounded, how it reports errors, how it is probed and how it stops. Timeouts for calls the service makes are `timeouts-and-deadlines` and `outbound-http-client`; shedding load is `overload-protection`; JSON mapping rules are `json-jackson3`.
+Every Spring Boot service that serves HTTP accepts the defaults of Tomcat and Spring MVC unless someone decides otherwise, and several of those defaults only hurt in production. A JSON body has no size limit at all, whatever the properties named `max-swallow-size` or `max-http-form-post-size` suggest. Errors come back in Boot's own `/error` JSON shape, or in whatever shape a hand-written catch-all handler picked, not in a standard format. With virtual threads on, nothing caps how many requests are in flight unless you add a cap. Tomcat waits 60 s for a silent client. A connection timeout lowered on its own also lowers the keep-alive timeout below the load balancer's, which shows up as random 502s. The shutdown phase timeout and the Kubernetes grace period are both 30 s by default, so with a preStop sleep the pod is killed mid-request. And a liveness probe that checks the database restarts every instance during a database outage. This skill fixes how a Spring MVC server is bounded, how it reports errors, how it is probed and how it stops. Timeouts for calls the service makes are `timeouts-and-deadlines` and `outbound-http-client`; shedding load is `overload-protection`; JSON mapping rules are `json-jackson3`.
 
 ## The rule
 
@@ -18,7 +18,7 @@ Every Spring Boot service that serves HTTP accepts the defaults of Tomcat and Sp
 3. Set `server.tomcat.connection-timeout` to a few seconds (5 s), and always set `server.tomcat.keep-alive-timeout` with it, longer than the idle timeout of the load balancer in front (65 s behind a 60 s ALB).
 4. Keep graceful shutdown on (the default), and make preStop sleep plus `spring.lifecycle.timeout-per-shutdown-phase` fit inside the orchestrator's grace period with a margin (10 s + 15 s inside 30 s).
 5. Point the orchestrator's liveness probe at `/actuator/health/liveness` (or `/livez`) and readiness at `/actuator/health/readiness` (or `/readyz`), and never add external systems such as the database to the liveness group.
-6. Turn on virtual threads with `spring.threads.virtual.enabled=true` (JDK 21+) and stop tuning `server.tomcat.threads.max`; bound concurrency per dependency instead.
+6. Turn on virtual threads (`spring.threads.virtual.enabled=true`, JDK 21+) only together with an in-flight cap at the edge, because no thread pool bounds concurrency any more: the first filter takes a `Semaphore` with `tryAcquire()` and answers 503 with `Retry-After` when it is full (sized by Little's law, see `overload-protection`), each dependency gets its own bound as well, the pool's `connectionTimeout` is never the admission control, and `server.tomcat.threads.max` is no longer tuned.
 7. Version an API with the `version` attribute on the mapping and `spring.mvc.apiversion.*` (Framework 7), not with copied `/v1` and `/v2` controllers.
 8. Raise `server.tomcat.accept-count` from its default of 100 to about 1024 (below the kernel's `net.core.somaxconn`) when a proxy or bursty clients open connections faster than Tomcat accepts them.
 
@@ -34,7 +34,7 @@ Every Spring Boot service that serves HTTP accepts the defaults of Tomcat and Sp
 
 **Rule 5.** Liveness and readiness groups are on by default in Boot 4 (`management.endpoint.health.probes.enabled=true`), and `management.endpoint.health.probes.add-additional-paths=true` also serves them at `/livez` and `/readyz` on the main port, which the [actuator reference](https://docs.spring.io/spring-boot/reference/actuator/endpoints.html) recommends so the probe checks the port that serves traffic. The same page warns that liveness "should not depend on health checks for external systems": if it does, a database outage makes Kubernetes restart every instance and turns a partial outage into a full one. Readiness may include dependencies the instance cannot serve without.
 
-**Rule 6.** With `spring.threads.virtual.enabled=true`, Tomcat runs each request on a virtual thread, and `server.tomcat.threads.max` (200) "doesn't have an effect if virtual threads are enabled". The thread pool no longer limits concurrency, so a slow dependency is no longer protected by it: put a per-dependency limit in front of it (`overload-protection`) and size the database pool deliberately (`postgres-hikari-pool`). The example's test checks that the handler runs on a virtual thread. Pinning and `ThreadLocal` caveats are in `virtual-threads`.
+**Rule 6.** With `spring.threads.virtual.enabled=true`, Tomcat runs each request on a virtual thread, and `server.tomcat.threads.max` (200) "doesn't have an effect if virtual threads are enabled". That pool was the only thing that capped how many requests were in flight. Without it Tomcat admits every connection it accepts (up to `max-connections`, 8192), and each admitted request keeps its body, its response and its wait in the heap. Per-dependency bounds do not replace the edge cap: a request waiting up to 30 s for a HikariCP connection (the default `connectionTimeout`) or for a bulkhead permit is still in flight, so they turn a spike into a queue in memory. Measured in benchmarks/orders-api (TUNING.md, scenario S3, 2 vCPU and 1 GiB): an agent-written service that followed the earlier version of this rule (virtual threads, per-dependency bounds, no edge cap) had 92% errors and a p50 of 3.2 s at 4,000 req/s, died with `OutOfMemoryError: Java heap space`, and still failed 20% of requests after the load fell back to 800 req/s; the hand-tuned service, with a `Semaphore(256)` taken by `tryAcquire()` in its first filter and a 503 when full, had 1.2% errors, a p50 of 1 ms, and recovered at once. The example's `AdmissionFilter` is ordered first, so a rejected request costs no body parsing, and it leaves `/livez` and `/readyz` outside, because a shed probe gets a busy but healthy pod restarted. Pinning and `ThreadLocal` caveats are in `virtual-threads`.
 
 **Rule 7.** Spring Framework 7 [maps versions natively](https://docs.spring.io/spring-framework/reference/web/webmvc-versioning.html): `@PostMapping(path = "/orders", version = "2")`, with the version read from a header, query parameter, path segment or media type parameter, configured through `spring.mvc.apiversion.*`. An unsupported version raises `InvalidApiVersionException` (400), and `ApiVersionDeprecationHandler` can send `Deprecation` and `Sunset` headers. Copied controllers under `/v1` and `/v2` accept any version string the router happens to match, drift apart, and double the code for every fix.
 
@@ -60,6 +60,13 @@ getBody().setDetail("Request body is larger than " + MAX_BODY_BYTES + " bytes.")
 }
 ```
 
+```java
+if (!permits.tryAcquire()) { // full: answer now, never queue
+response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+response.setHeader("Retry-After", "1");
+response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
+```
+
 ```properties
 spring.mvc.problemdetails.enabled=true
 spring.threads.virtual.enabled=true
@@ -79,7 +86,7 @@ client.post().uri("/orders").contentType(MediaType.APPLICATION_JSON).body(big)
 .expectBody().jsonPath("$.status").isEqualTo(413);
 ```
 
-`OrdersApplicationTest` starts the real Tomcat on a random port (`@SpringBootTest` with `@AutoConfigureRestTestClient`, from `spring-boot-resttestclient`) and checks that a 128 KiB JSON body gets a 413 as `application/problem+json`, that malformed JSON gets a 400 problem, that the handler runs on a virtual thread, that `API-Version: 2` selects the second handler and `API-Version: 9` gets a 400 problem, that `/livez` and `/readyz` answer on the main port, that a silent connection is closed by the server, and that the running connector's accept backlog is 1024.
+`OrdersApplicationTest` starts the real Tomcat on a random port (`@SpringBootTest` with `@AutoConfigureRestTestClient`, from `spring-boot-resttestclient`) and checks that with every admission permit held a request gets a 503 `application/problem+json` with `Retry-After` while `/livez` still answers, that a 128 KiB JSON body gets a 413 as `application/problem+json`, that malformed JSON gets a 400 problem, that the handler runs on a virtual thread, that `API-Version: 2` selects the second handler and `API-Version: 9` gets a 400 problem, that `/livez` and `/readyz` answer on the main port, that a silent connection is closed by the server, and that the running connector's accept backlog is 1024.
 
 ## Bad example
 
@@ -89,6 +96,12 @@ See [`examples/bad/`](examples/bad/).
 # MISTAKE: read as "max request body = 1MB". It is only how much of an ignored body
 # Tomcat discards before closing the connection; JSON bodies stay unlimited.
 server.tomcat.max-swallow-size=1MB
+```
+
+```properties
+# MISTAKE: virtual threads on and no in-flight cap at the edge. The Tomcat pool was the only
+# limit; now a spike admits every request until the heap is full (OutOfMemoryError).
+spring.threads.virtual.enabled=true
 ```
 
 ```properties
@@ -116,13 +129,13 @@ The project also leaves `server.tomcat.accept-count` at 100, tunes `server.tomca
 
 When reviewing code under this skill, confirm:
 
-- [ ] Every endpoint that reads a body is behind an application-level size limit that answers 413, and nobody relies on `max-swallow-size` or `max-http-form-post-size` for JSON.
-- [ ] `spring.servlet.multipart.max-file-size` and `max-request-size` are set explicitly when the service accepts uploads.
+- [ ] Every endpoint that reads a body is behind an application-level size limit that answers 413 (nobody relies on `max-swallow-size` or `max-http-form-post-size` for JSON), and the multipart limits are set explicitly when the service accepts uploads.
 - [ ] `spring.mvc.problemdetails.enabled=true`, and a test asserts `application/problem+json` for at least one error.
 - [ ] No `@ExceptionHandler(Exception.class)` or `Throwable.class` that maps everything to 500 or returns `e.getMessage()`.
 - [ ] `server.tomcat.connection-timeout` is a few seconds, and `server.tomcat.keep-alive-timeout` is set next to it, above the load balancer's idle timeout.
 - [ ] `server.shutdown` is not `immediate`, and preStop sleep plus `spring.lifecycle.timeout-per-shutdown-phase` is below `terminationGracePeriodSeconds`.
 - [ ] Liveness and readiness probes point at the health groups, and the liveness group includes no database, cache or remote API.
+- [ ] With virtual threads on, the first filter caps in-flight requests with a `Semaphore` `tryAcquire()` that answers 503 with `Retry-After`, sized by Little's law in a comment, with the probes outside it; no per-dependency limit or pool timeout stands in for it.
 - [ ] With virtual threads on, there is no `server.tomcat.threads.max` tuning and slow dependencies have their own concurrency limit.
 - [ ] New API versions use `version = "..."` on the mapping with `spring.mvc.apiversion.*`, not copied controllers.
 - [ ] `server.tomcat.accept-count` is raised (about 1024, below `net.core.somaxconn`) for a service behind a proxy or with bursty traffic, and a p99 near 1 s is checked against `ListenOverflows`.
