@@ -27,7 +27,9 @@ public final class Transactions {
     public Transactions(PlatformTransactionManager manager, int isolation) {
         this.template = new TransactionTemplate(manager);
         this.template.setIsolationLevel(isolation);
-        this.template.setTimeout(5); // seconds; ends the transaction if work hangs
+        // No setTimeout: with pgJDBC it becomes a query timeout, and a driver timer task,
+        // on every statement. The bound is server-side: statement_timeout and
+        // idle_in_transaction_session_timeout in the connection options (see the test pool).
     }
 
     /** The retry wraps the transaction, so every attempt is a fresh BEGIN ... COMMIT. */

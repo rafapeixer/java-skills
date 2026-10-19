@@ -1,12 +1,13 @@
 java-skills is installed. Before writing or reviewing Java backend code, a pom.xml, a Dockerfile or Spring Boot configuration, load the matching java-skills skill, even for a small change. Traps these skills exist to catch:
-- Compile with `<maven.compiler.release>25</maven.compiler.release>`; Spring Boot 4.1.1 pins pgJDBC 42.7.13 (CVEs) and HikariCP 7.0.2: set `postgresql.version` 42.7.14 and `hikaricp.version` 7.1.0.
-- Containers: `-XX:MaxRAMPercentage=75 -XX:+UseG1GC`, never a hardcoded `-Xmx`; the default heap is 25% of the limit, and on JDK 25 a 1-CPU or <1792 MB container silently gets Serial GC.
-- Virtual threads: one per task (`Executors.newVirtualThreadPerTaskExecutor()` in try-with-resources), never pooled; bound a scarce resource with a `Semaphore`. Executors and `CompletableFuture` do not inherit a `ScopedValue`.
-- HikariCP: pool size = connection budget / (max replicas + deploy surge), never from threads or CPUs; leave minimumIdle unset.
-- On JDK 25 `HttpRequest.timeout` does not bound a slow body: use `sendAsync(...).get(timeout)` with `cancel(true)`, and pass the remaining request deadline, never a fixed per-call timeout.
-- Spring MVC on Tomcat has no size limit for JSON bodies: bound them in a filter and answer 413.
-- Never publish to a broker inside `@Transactional` or from `afterCommit`: write an outbox row in the same transaction and relay it with `FOR UPDATE SKIP LOCKED`.
-- `catch (InterruptedException e)` restores the interrupt first; errors map to `ProblemDetail` in one `@RestControllerAdvice`.
-- Jackson 3: FAIL_ON_UNKNOWN_PROPERTIES is off and document length is unlimited by default.
-- Mockito on JDK 21+ needs `-javaagent`; test against a real database with Testcontainers, not H2; inject a `Clock`.
+- `<maven.compiler.release>25</maven.compiler.release>`; Spring Boot 4.1.1 pins pgJDBC 42.7.13 (CVEs) and HikariCP 7.0.2: set `postgresql.version` 42.7.14, `hikaricp.version` 7.1.0.
+- HikariCP: pool = connection budget / (max replicas + ceil(maxSurge)); maxSurge defaults to 25%, so 80 / (8 + 2) = 8, not 80 / 16. Never from threads or CPUs; minimumIdle unset.
+- A read that is one statement gets no `@Transactional` (not even readOnly): load children in the same statement (LEFT JOIN LATERAL + array_agg), insert parent + children in one CTE. Bound SQL with server-side statement_timeout, not `@Transactional(timeout)`.
+- Build each shared `HttpClient` with `.executor(Executors.newVirtualThreadPerTaskExecutor())`. On JDK 25 `HttpRequest.timeout` does not bound a slow body: `sendAsync(...).get(remaining deadline)` plus `cancel(true)`.
+- Containers: `-XX:InitialRAMPercentage=75 -XX:MaxRAMPercentage=75 -XX:+UseG1GC`, never `-Xmx`; on JDK 25 a 1-CPU or <1792 MB container silently gets Serial GC.
+- Virtual threads: one per task, never pooled; bound scarce resources with a `Semaphore`. Executors do not inherit a `ScopedValue`.
+- Tomcat has no size limit for JSON bodies: bound them in a filter, answer 413.
+- No broker publish inside `@Transactional`: outbox row, relayed with `FOR UPDATE SKIP LOCKED`.
+- Restore the interrupt on `InterruptedException`; errors map to `ProblemDetail` in one `@RestControllerAdvice`.
+- Jackson 3: FAIL_ON_UNKNOWN_PROPERTIES is off, document length unlimited by default.
+- Test against a real database with Testcontainers, not H2; Mockito needs `-javaagent`; inject a `Clock`.
 - Never pin TLS named groups (drops JDK 27's post-quantum default); tokens from `new SecureRandom()`.

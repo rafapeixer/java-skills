@@ -1,8 +1,8 @@
 ---
 name: http-server
-description: Use when writing or reviewing a Spring Boot HTTP service on Spring MVC and Tomcat (spring-boot-starter-webmvc): setting server.tomcat.* timeouts, limiting request body or upload size, returning REST errors, writing @ExceptionHandler or @ControllerAdvice, enabling virtual threads, adding liveness/readiness checks, versioning an API, or tuning graceful shutdown for Kubernetes. Key rule: Tomcat has no size limit for JSON bodies (max-swallow-size and max-http-form-post-size do not apply), so bound every body yourself and answer 413; set spring.mvc.problemdetails.enabled=true so errors are application/problem+json, with no catch-all handler turning 4xx into 500; keep connection-timeout low and keep-alive-timeout above the load balancer idle timeout; preStop sleep plus spring.lifecycle.timeout-per-shutdown-phase must fit the grace period; liveness never checks the database; version with the mapping version attribute and spring.mvc.apiversion.*, not copied /v1 controllers. Spring Boot 4.1, Tomcat 11.
+description: Use when writing or reviewing a Spring Boot HTTP service on Spring MVC and Tomcat (spring-boot-starter-webmvc): setting server.tomcat.* timeouts or backlog, limiting body or upload size, returning REST errors, writing @ExceptionHandler/@ControllerAdvice, enabling virtual threads, adding liveness/readiness checks, versioning an API, or tuning graceful shutdown. Key rule: Tomcat has no size limit for JSON bodies (max-swallow-size and max-http-form-post-size do not apply): bound every body yourself, answer 413; set spring.mvc.problemdetails.enabled=true (application/problem+json), no catch-all handler turning 4xx into 500; keep connection-timeout low and keep-alive-timeout above the load balancer idle timeout; server.tomcat.accept-count ~1024, not 100, for bursty load (p99 near 1 s); preStop sleep + timeout-per-shutdown-phase must fit the grace period; liveness never checks the database; version with the mapping version attribute and spring.mvc.apiversion.*, not /v1 copies. Spring Boot 4.1, Tomcat 11.
 metadata:
-  verified: 2026-10-18
+  verified: 2026-10-19
 ---
 
 # HTTP server
@@ -20,6 +20,7 @@ Every Spring Boot service that serves HTTP accepts the defaults of Tomcat and Sp
 5. Point the orchestrator's liveness probe at `/actuator/health/liveness` (or `/livez`) and readiness at `/actuator/health/readiness` (or `/readyz`), and never add external systems such as the database to the liveness group.
 6. Turn on virtual threads with `spring.threads.virtual.enabled=true` (JDK 21+) and stop tuning `server.tomcat.threads.max`; bound concurrency per dependency instead.
 7. Version an API with the `version` attribute on the mapping and `spring.mvc.apiversion.*` (Framework 7), not with copied `/v1` and `/v2` controllers.
+8. Raise `server.tomcat.accept-count` from its default of 100 to about 1024 (below the kernel's `net.core.somaxconn`) when a proxy or bursty clients open connections faster than Tomcat accepts them.
 
 ## Why
 
@@ -36,6 +37,8 @@ Every Spring Boot service that serves HTTP accepts the defaults of Tomcat and Sp
 **Rule 6.** With `spring.threads.virtual.enabled=true`, Tomcat runs each request on a virtual thread, and `server.tomcat.threads.max` (200) "doesn't have an effect if virtual threads are enabled". The thread pool no longer limits concurrency, so a slow dependency is no longer protected by it: put a per-dependency limit in front of it (`overload-protection`) and size the database pool deliberately (`postgres-hikari-pool`). The example's test checks that the handler runs on a virtual thread. Pinning and `ThreadLocal` caveats are in `virtual-threads`.
 
 **Rule 7.** Spring Framework 7 [maps versions natively](https://docs.spring.io/spring-framework/reference/web/webmvc-versioning.html): `@PostMapping(path = "/orders", version = "2")`, with the version read from a header, query parameter, path segment or media type parameter, configured through `spring.mvc.apiversion.*`. An unsupported version raises `InvalidApiVersionException` (400), and `ApiVersionDeprecationHandler` can send `Deprecation` and `Sunset` headers. Copied controllers under `/v1` and `/v2` accept any version string the router happens to match, drift apart, and double the code for every fix.
+
+**Rule 8.** `acceptCount` is the listen backlog: "When this queue is full, the operating system may actively refuse additional connections or those connections may time out. The default value is 100" ([Tomcat 11 HTTP connector](https://tomcat.apache.org/tomcat-11.0-doc/config/http.html)); Spring Boot sets it with `server.tomcat.accept-count`. When the application stalls for a moment, a proxy such as nginx opens new upstream connections in a burst, the backlog overflows, Linux drops the SYN, and the client retransmits it after about a second. The symptom is a p99 near 1 s plus a few client timeouts and 504s the application never logs; confirm it with `ListenOverflows` and `ListenDrops` in `/proc/net/netstat` inside the container. Measured in benchmarks/orders-api (TUNING.md): every overloaded run had a p99 near 1,040 ms and `ListenOverflows 95` after a spike; with 1024 the counter stayed at 0, the max latency at 4,000 req/s fell from 1,234 to 458 ms and client timeouts from 67 to 7. The kernel caps the backlog at `net.core.somaxconn` (4096 in that container), so a larger value has no effect. This does not replace admission control (see `overload-protection`): the backlog only stops the kernel from dropping connections before Tomcat can answer them, with a fast 503 if need be. The example's test reads the running connector's `acceptCount`.
 
 ## Good example
 
@@ -62,6 +65,7 @@ spring.mvc.problemdetails.enabled=true
 spring.threads.virtual.enabled=true
 server.tomcat.connection-timeout=5s
 server.tomcat.keep-alive-timeout=65s
+server.tomcat.accept-count=1024
 spring.lifecycle.timeout-per-shutdown-phase=15s
 management.endpoint.health.probes.add-additional-paths=true
 spring.mvc.apiversion.use.header=API-Version
@@ -75,7 +79,7 @@ client.post().uri("/orders").contentType(MediaType.APPLICATION_JSON).body(big)
 .expectBody().jsonPath("$.status").isEqualTo(413);
 ```
 
-`OrdersApplicationTest` starts the real Tomcat on a random port (`@SpringBootTest` with `@AutoConfigureRestTestClient`, from `spring-boot-resttestclient`) and checks that a 128 KiB JSON body gets a 413 as `application/problem+json`, that malformed JSON gets a 400 problem, that the handler runs on a virtual thread, that `API-Version: 2` selects the second handler and `API-Version: 9` gets a 400 problem, that `/livez` and `/readyz` answer on the main port, and that a silent connection is closed by the server.
+`OrdersApplicationTest` starts the real Tomcat on a random port (`@SpringBootTest` with `@AutoConfigureRestTestClient`, from `spring-boot-resttestclient`) and checks that a 128 KiB JSON body gets a 413 as `application/problem+json`, that malformed JSON gets a 400 problem, that the handler runs on a virtual thread, that `API-Version: 2` selects the second handler and `API-Version: 9` gets a 400 problem, that `/livez` and `/readyz` answer on the main port, that a silent connection is closed by the server, and that the running connector's accept backlog is 1024.
 
 ## Bad example
 
@@ -106,7 +110,7 @@ management.endpoint.health.group.liveness.include=livenessState,db
 ResponseEntity<Map<String, String>> handle(Exception e) {
 ```
 
-The project also tunes `server.tomcat.threads.max` with virtual threads on, copies the controller for `/v1/orders` and `/v2/orders`, and leaves `spring.mvc.problemdetails.enabled` at its `false` default. It all compiles, starts, and passes a happy-path test.
+The project also leaves `server.tomcat.accept-count` at 100, tunes `server.tomcat.threads.max` with virtual threads on, copies the controller for `/v1/orders` and `/v2/orders`, and leaves `spring.mvc.problemdetails.enabled` at its `false` default. It all compiles, starts, and passes a happy-path test.
 
 ## Checklist
 
@@ -121,6 +125,7 @@ When reviewing code under this skill, confirm:
 - [ ] Liveness and readiness probes point at the health groups, and the liveness group includes no database, cache or remote API.
 - [ ] With virtual threads on, there is no `server.tomcat.threads.max` tuning and slow dependencies have their own concurrency limit.
 - [ ] New API versions use `version = "..."` on the mapping with `spring.mvc.apiversion.*`, not copied controllers.
+- [ ] `server.tomcat.accept-count` is raised (about 1024, below `net.core.somaxconn`) for a service behind a proxy or with bursty traffic, and a p99 near 1 s is checked against `ListenOverflows`.
 
 ## When not to apply
 

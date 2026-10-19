@@ -10,6 +10,7 @@ import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Set;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
 
 /** The only client for the pricing service. Built once at startup, shared by every request. */
@@ -20,7 +21,7 @@ public final class PricingClient {
     static final Duration BACKOFF_CAP = Duration.ofSeconds(1);
     static final Set<Integer> RETRYABLE = Set.of(429, 502, 503, 504);
 
-    private final HttpClient http;
+    final HttpClient http;
     private final URI base;
 
     public PricingClient(URI base) {
@@ -28,6 +29,9 @@ public final class PricingClient {
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(1)) // bounds only TCP (and TLS) setup
                 .followRedirects(HttpClient.Redirect.NEVER) // the default; stated so nobody "fixes" it
+                // The default executor is a platform thread pool that runs the client's
+                // response handling; virtual threads keep that work on the caller's scheduler.
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
     }
 

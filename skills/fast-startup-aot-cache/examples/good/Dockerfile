@@ -17,9 +17,11 @@ COPY --from=builder /builder/extracted/application/ ./
 # Training run in the runtime image, so the cache matches this exact JDK and these jars.
 # onRefresh stops after the context starts: no traffic, no scheduled jobs.
 # The one-step workflow forks a second JVM with the same heap: give the build 2x the heap.
-RUN java -XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh -jar application.jar
+# There is no database in the build: Hikari fails fast at startup by default (1 ms), so
+# only the training run skips the initial connection (-1); production keeps failing fast.
+RUN java -XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh -Dspring.datasource.hikari.initialization-fail-timeout=-1 -jar application.jar
 
 USER 10001
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+UseG1GC"
+ENV JAVA_TOOL_OPTIONS="-XX:InitialRAMPercentage=75 -XX:MaxRAMPercentage=75 -XX:+UseG1GC"
 # Default AOTMode (auto): if the cache ever stops matching, the app still starts, only slower.
 ENTRYPOINT ["java", "-XX:AOTCache=app.aot", "-jar", "application.jar"]

@@ -43,6 +43,10 @@ public class Main {
             expectStatus(404, () -> pricing.price("missing", timeout));
         }
         check(clientPorts.size() == 1, "20 calls should share 1 connection, used " + clientPorts.size());
+        // The client's own work runs on virtual threads, not on a platform thread pool.
+        var onVirtual = new java.util.concurrent.CompletableFuture<Boolean>();
+        pricing.http.executor().orElseThrow().execute(() -> onVirtual.complete(Thread.currentThread().isVirtual()));
+        check(onVirtual.get(5, java.util.concurrent.TimeUnit.SECONDS), "HttpClient executor is not virtual-thread based");
 
         // 2. A GET that fails twice with 503 succeeds on the third attempt.
         hits.set(0);

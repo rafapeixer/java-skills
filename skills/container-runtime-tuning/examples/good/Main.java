@@ -14,7 +14,7 @@ import java.util.List;
 public class Main {
 
     // The same value as ENV JAVA_TOOL_OPTIONS in the Dockerfile.
-    static final String JAVA_TOOL_OPTIONS = "-XX:MaxRAMPercentage=75 -XX:+UseG1GC";
+    static final String JAVA_TOOL_OPTIONS = "-XX:InitialRAMPercentage=75 -XX:MaxRAMPercentage=75 -XX:+UseG1GC";
 
     // Above this the default cap applies on JDK 25 (MaxRAM, 128 GB) and the check is skipped.
     static final long CAP = 128L << 30;
@@ -50,20 +50,24 @@ public class Main {
         long detected = os.getTotalMemorySize();
         var hotspot = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
         long maxHeapSize = Long.parseLong(hotspot.getVMOption("MaxHeapSize").getValue());
+        long initialHeapSize = Long.parseLong(hotspot.getVMOption("InitialHeapSize").getValue());
         double percent = Double.parseDouble(hotspot.getVMOption("MaxRAMPercentage").getValue());
         long maxMemory = Runtime.getRuntime().maxMemory();
         List<String> gcs = ManagementFactory.getGarbageCollectorMXBeans().stream()
                 .map(GarbageCollectorMXBean::getName).toList();
 
-        System.out.printf("detected=%d MiB cpus=%d MaxRAMPercentage=%.1f MaxHeapSize=%d MiB maxMemory=%d MiB gc=%s%n",
+        System.out.printf("detected=%d MiB cpus=%d MaxRAMPercentage=%.1f InitialHeapSize=%d MiB MaxHeapSize=%d MiB maxMemory=%d MiB gc=%s%n",
                 detected >> 20, Runtime.getRuntime().availableProcessors(), percent,
-                maxHeapSize >> 20, maxMemory >> 20, gcs);
+                initialHeapSize >> 20, maxHeapSize >> 20, maxMemory >> 20, gcs);
 
         assert percent == expectedPercent : "MaxRAMPercentage is " + percent + ", want " + expectedPercent;
         assert maxMemory <= maxHeapSize : "maxMemory above MaxHeapSize";
         if (tuned) {
             // The GC is named in the options, so JDK 25 and 27 agree even in a small container.
             assert gcs.stream().anyMatch(n -> n.startsWith("G1")) : "want G1, got " + gcs;
+            // Initial = max: G1 does not start from a tiny heap and resize it under load.
+            assert initialHeapSize == maxHeapSize
+                    : "InitialHeapSize " + (initialHeapSize >> 20) + " MiB, MaxHeapSize " + (maxHeapSize >> 20) + " MiB";
         }
         if (detected > CAP || detected < (1L << 30)) {
             // Over the cap, or small enough that MinRAMPercentage (heaps near 125 MB) applies.

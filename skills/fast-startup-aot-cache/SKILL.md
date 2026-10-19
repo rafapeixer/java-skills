@@ -1,8 +1,8 @@
 ---
 name: fast-startup-aot-cache
-description: Use when a Java or Spring Boot service starts too slowly (scale-to-zero, autoscaling, serverless, CLI tools, slow Kubernetes readiness), when adding an AOT cache, CDS or -XX:AOTCacheOutput / -XX:AOTCache to a Dockerfile or buildpack, or when choosing between the AOT cache, GraalVM native image and CRaC. Key rule: on JDK 25+ use the Project Leyden AOT cache first (JEP 483/514/515): train with -XX:AOTCacheOutput=app.aot, run with -XX:AOTCache=app.aot; in Spring Boot extract with -Djarmode=tools, train with -Dspring.context.exit=onRefresh in the runtime image, or set BP_JVM_AOTCACHE_ENABLED=true with buildpacks; the cache must match the exact JDK, OS/arch and jar class path, so create it in the same image that runs it and keep the default AOTMode (auto) in production; one-step training needs about twice the heap; choose GraalVM native image only when milliseconds of startup or a small footprint justify its closed-world build; CRaC is not in mainline JDK builds; never assert startup timings in tests.
+description: Use when a Java/Spring Boot service starts too slowly (scale-to-zero, autoscaling, serverless, CLIs, slow readiness), when adding an AOT cache or CDS to a Dockerfile or buildpack, or choosing between the AOT cache, GraalVM native image and CRaC. Key rule: on JDK 25+ use the Leyden AOT cache first (JEP 483/514/515): train with -XX:AOTCacheOutput=app.aot, run with -XX:AOTCache=app.aot; in Spring Boot extract with -Djarmode=tools, train with -Dspring.context.exit=onRefresh in the runtime image (no database in the build: Hikari initialization-fail-timeout=-1 on the training run only), or BP_JVM_AOTCACHE_ENABLED=true with buildpacks; the cache must match the exact JDK, OS/arch and jar class path, so create it in the image that runs it, default AOTMode (auto) in production; it halves startup but not cold-JIT errors; one-step training needs 2x the heap; GraalVM native image only when millisecond startup or footprint justify a closed-world build; CRaC is not in mainline JDKs; never assert startup times in tests.
 metadata:
-  verified: 2026-10-18
+  verified: 2026-10-19
 ---
 
 # Fast startup with the AOT cache
@@ -16,7 +16,7 @@ A JVM service spends its first seconds loading, verifying and linking thousands 
 1. On JDK 25+, use the AOT cache before anything else: train once with `-XX:AOTCacheOutput=app.aot`, then start with `-XX:AOTCache=app.aot`.
 2. Create the cache in the same image, JDK build and class path that run it, as a step of the image build, never as a file copied from another build.
 3. Put the application on the class path as jar files (`-jar` or jars in `-cp`), never as a class directory, and keep the same class path and module options in training and production.
-4. In Spring Boot 4.1, extract the jar with `-Djarmode=tools extract`, train with `-Dspring.context.exit=onRefresh` on the extracted `application.jar`, or set `BP_JVM_AOTCACHE_ENABLED=true` for buildpack images.
+4. In Spring Boot 4.1, extract the jar with `-Djarmode=tools extract` and train with `-Dspring.context.exit=onRefresh` on the extracted `application.jar`, relaxing for the training run only what connects at startup (`spring.datasource.hikari.initialization-fail-timeout=-1`), or set `BP_JVM_AOTCACHE_ENABLED=true` for buildpack images.
 5. Leave `-XX:AOTMode` at its default (`auto`) in production, and use `required` (`on` on JDK 25) only in a build check that must fail when the cache is unusable.
 6. Give the one-step training run about twice the heap it normally uses, or switch to the two-step `record`/`create` workflow when the build machine is small.
 7. Choose GraalVM native image only when you need millisecond startup or a much smaller footprint and can accept a closed-world build; do not plan on CRaC, which is not in mainline JDK builds.
@@ -30,7 +30,7 @@ A JVM service spends its first seconds loading, verifying and linking thousands 
 
 **Rule 3.** JEP 483: "Only JAR files are supported; directories are not", and production may append entries to the class path but must otherwise match training. The arguments of `-m`, `--module-path`, `--add-modules` and `--enable-native-access` must be identical, and options such as `--add-opens` or `--patch-module` must not be used. Classes from custom class loaders and signed jars are not cached. A build that trains with `-cp target/classes` and ships `-jar app.jar` caches only JDK classes.
 
-**Rule 4.** The [Spring Boot AOT cache reference](https://docs.spring.io/spring-boot/reference/packaging/aot-cache.html) supports the cache on Java 25 and above and gives the flow: `java -Djarmode=tools -jar my-app.jar extract`, then `java -XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh -jar my-app.jar` in the extracted folder, then `java -XX:AOTCache=app.aot -jar my-app.jar`. It adds: "You have to use the cache file with the extracted form of the application, otherwise it has no effect." `spring.context.exit=onRefresh` stops the application once the context has started, so the training run loads every bean class without serving traffic or running jobs. Beans that connect to remote services at startup still do so during the build; the [how-to guide](https://docs.spring.io/spring-boot/how-to/aot-cache.html) says to prevent that through configuration. With Cloud Native Buildpacks, the same guide says `BP_JVM_AOTCACHE_ENABLED=true` makes the buildpack run the training, store the cache in the image and use it at launch; `TRAINING_RUN_JAVA_TOOL_OPTIONS` overrides `JAVA_TOOL_OPTIONS` for the training run only.
+**Rule 4.** The [Spring Boot AOT cache reference](https://docs.spring.io/spring-boot/reference/packaging/aot-cache.html) supports the cache on Java 25 and above and gives the flow: `java -Djarmode=tools -jar my-app.jar extract`, then `java -XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh -jar my-app.jar` in the extracted folder, then `java -XX:AOTCache=app.aot -jar my-app.jar`. It adds: "You have to use the cache file with the extracted form of the application, otherwise it has no effect." `spring.context.exit=onRefresh` stops the application once the context has started, so the training run loads every bean class without serving traffic or running jobs. Beans that connect to remote services at startup still do so during the build; the [how-to guide](https://docs.spring.io/spring-boot/how-to/aot-cache.html) says to prevent that through configuration. The usual one is the pool: HikariCP's `initializationFailTimeout` defaults to 1 ms, which fails startup when the database is unreachable, and "a value less than zero will bypass any initial connection attempt" ([HikariCP README](https://github.com/brettwooldridge/HikariCP)). Pass `-Dspring.datasource.hikari.initialization-fail-timeout=-1` on the training `RUN` line only (or, with a hand-built pool, read the value from a property that only the build sets), so the build needs no database and production still fails fast. Measured in benchmarks/orders-api (TUNING.md) with that recipe: startup went from 1.93 s to 1.00 s. It did not fix the first seconds under load: a cold 1,500 req/s phase had 3.1-5.1% errors with the cache and 5.1% without, inside the spread, because the cache holds classes loaded and linked at startup while those errors came from the JIT compiling request paths (late C2 compilations and deoptimizations in JFR). JEP 515's method profiles need a representative training workload, which a build without a database cannot run; for the cold start, keep readiness behind a warm-up or ramp traffic onto new pods. With Cloud Native Buildpacks, the same guide says `BP_JVM_AOTCACHE_ENABLED=true` makes the buildpack run the training, store the cache in the image and use it at launch; `TRAINING_RUN_JAVA_TOOL_OPTIONS` overrides `JAVA_TOOL_OPTIONS` for the training run only.
 
 **Rule 5.** In the default `auto` mode, a cache that fails to load is skipped and the JVM runs normally; the `java` reference calls this "the recommended mode for production environments". `required` (JDK 27; `on` is now its discouraged alias, and JDK 25 has only `on`) makes the JVM "print an error message and exit immediately", which is what you want in a build check and exactly what you do not want in a pod: an unexpected flag added by an operator turns into a crash loop. To see whether production uses the cache, start it once with `-Xlog:aot`.
 
@@ -49,7 +49,7 @@ See [`examples/good/`](examples/good/).
 ```dockerfile
 RUN java -Djarmode=tools -jar application.jar extract --layers --destination extracted
 FROM eclipse-temurin:25-jre
-RUN java -XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh -jar application.jar
+RUN java -XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh -Dspring.datasource.hikari.initialization-fail-timeout=-1 -jar application.jar
 ENTRYPOINT ["java", "-XX:AOTCache=app.aot", "-jar", "application.jar"]
 ```
 
@@ -61,7 +61,7 @@ assert production.exit == 0 : "cache not usable:\n" + production.output;
 return Runtime.version().feature() >= 27 ? "required" : "on";
 ```
 
-`Main.java` compiles a small program into `app.jar`, trains a cache with the same JDK it runs on (`ProcessHandle.current().info().command()`), runs the jar with the cache in the mode that fails when the cache is unusable, then rebuilds the jar and asserts that the stale cache is refused in that mode and skipped in the default mode. The `Dockerfile` is the Spring Boot flow with the training run inside the runtime image and a non-root user.
+`Main.java` compiles a small program into `app.jar`, trains a cache with the same JDK it runs on (`ProcessHandle.current().info().command()`), runs the jar with the cache in the mode that fails when the cache is unusable, then rebuilds the jar and asserts that the stale cache is refused in that mode and skipped in the default mode. The `Dockerfile` is the Spring Boot flow with the training run inside the runtime image, no database needed at build time, and a non-root user.
 
 ## Bad example
 
@@ -90,7 +90,7 @@ When reviewing a build or Dockerfile under this skill, confirm:
 - [ ] The training run happens in the final runtime image, so its JDK build is the one that loads the cache.
 - [ ] Training and production use the same jars in the same class path order and the same module options, with no class directories.
 - [ ] A Spring Boot app is extracted with `-Djarmode=tools` and trained with `-Dspring.context.exit=onRefresh`, or built with `BP_JVM_AOTCACHE_ENABLED=true`.
-- [ ] The training run does not reach production databases or partner APIs.
+- [ ] The training run does not reach production databases or partner APIs, and startup checks relaxed for it (Hikari `initialization-fail-timeout=-1`) are relaxed on the training command only.
 - [ ] Production keeps the default `AOTMode`; `required`/`on` appears only in a build or CI check.
 - [ ] The build has memory for about twice the training heap, or uses the two-step workflow.
 - [ ] Tests check that the cache loads (exit code with `required`/`on`, or `-Xlog:aot`), not a startup time.

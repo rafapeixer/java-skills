@@ -48,6 +48,18 @@ public class OrderService {
         return id;
     }
 
+    // MISTAKE: a transaction around a read. readOnly = true still costs a BEGIN and a COMMIT
+    // round trip and holds the connection across both queries, and timeout = 2 makes
+    // pgJDBC arm a timer task for every statement.
+    @Transactional(readOnly = true, timeout = 2)
+    public Map<String, Object> find(long id) {
+        Map<String, Object> order = jdbc.sql("select * from orders where id = ?").param(id).query().singleRow();
+        // MISTAKE: the items in a second query: one more round trip on every read.
+        order.put("items", jdbc.sql("select sku, qty from order_items where order_id = ?")
+                .param(id).query().listOfRows());
+        return order;
+    }
+
     public List<Map<String, Object>> page(String customerId, String sort, int page) {
         // MISTAKE: request text concatenated into SQL. sort=id;drop table orders-- runs.
         // MISTAKE: OFFSET reads and discards every earlier row; page 5000 scans 100,000 rows,

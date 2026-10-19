@@ -38,6 +38,9 @@ class OrderServiceTest {
         dataSource.setPassword(postgres.getPassword());
         dataSource.setMaximumPoolSize(4);
         dataSource.addDataSourceProperty("reWriteBatchedInserts", "true");
+        // The server bounds every statement and every idle open transaction.
+        dataSource.addDataSourceProperty("options",
+                "-c statement_timeout=5000 -c idle_in_transaction_session_timeout=10000");
         context = new AnnotationConfigApplicationContext();
         context.registerBean(DataSource.class, () -> dataSource);
         context.register(AppConfig.class);
@@ -62,11 +65,27 @@ class OrderServiceTest {
         assertEquals(2, count("select count(*) from order_items where order_id = " + id));
         assertEquals(1, count("select count(*) from outbox where payload->>'order_id' = '" + id + "'"));
 
+        // The page read returns the order with its items, from one statement.
+        var placed = orders.page(1, null, 10).stream().filter(o -> o.id() == id).findFirst().orElseThrow();
+        assertEquals(List.of(new OrderService.Item("A", 1), new OrderService.Item("B", 2)), placed.items());
+
         long before = count("select count(*) from orders");
-        // qty 0 breaks a CHECK after the order row was inserted: the proxy rolls back all of it.
+        // qty 0 breaks a CHECK in the items insert: the one statement fails as a whole,
+        // so the order row and the outbox row are not written either.
         assertThrows(DataIntegrityViolationException.class,
                 () -> orders.placeOrder(1, 100, List.of(new OrderService.Item("C", 0))));
         assertEquals(before, count("select count(*) from orders"));
+    }
+
+    @Test
+    void severalStatementsCommitTogetherThroughTheProxy() {
+        long before = count("select count(*) from orders");
+        // The second order fails after the first was inserted: @Transactional rolls back both.
+        assertThrows(DataIntegrityViolationException.class, () -> orders.importOrders(2,
+                List.of(List.of(new OrderService.Item("A", 1)), List.of(new OrderService.Item("B", 0)))));
+        assertEquals(before, count("select count(*) from orders"));
+        assertEquals(2, orders.importOrders(2,
+                List.of(List.of(new OrderService.Item("A", 1)), List.of(new OrderService.Item("B", 1)))).size());
     }
 
     @Test
@@ -117,6 +136,12 @@ class OrderServiceTest {
         assertEquals(3, attempts.get(), "one transaction ran twice");
         assertTrue(Transactions.retryable(new java.sql.SQLException("x", "40P01")));
         assertTrue(!Transactions.retryable(new java.sql.SQLException("x", "23505")));
+    }
+
+    @Test
+    void theServerBoundsStatementsAndIdleTransactions() {
+        assertEquals("5s", jdbc.sql("show statement_timeout").query(String.class).single());
+        assertEquals("10s", jdbc.sql("show idle_in_transaction_session_timeout").query(String.class).single());
     }
 
     private static long count(String sql) {

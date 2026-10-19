@@ -1,8 +1,8 @@
 ---
 name: overload-protection
-description: Use when writing or reviewing Java code that decides what a service does above capacity, adds a concurrency limit to an endpoint or a method, creates an ExecutorService or ThreadPoolExecutor for request or background work, enables virtual threads on a server, or sees latency climb and memory grow under load. Key rule: cap in-flight work with a Semaphore at the edge and use tryAcquire (no wait, or a few milliseconds at most) to answer 503 with Retry-After at once instead of queueing; size every limit by Little's law from measured peak (concurrency = throughput × latency, plus headroom) with the arithmetic in a comment; never Executors.newFixedThreadPool or newSingleThreadExecutor for work that can outrun it (unbounded queue): use ThreadPoolExecutor with an ArrayBlockingQueue and AbortPolicy and shed on RejectedExecutionException; in Spring Framework 7 use @ConcurrencyLimit with policy = REJECT (the default BLOCK is a queue) and @EnableResilientMethods; one bound per dependency.
+description: Use when writing or reviewing Java code that decides what a service does above capacity, adds a concurrency limit or bulkhead, creates an ExecutorService or ThreadPoolExecutor for request or background work, enables virtual threads on a server, or sees 503s, latency or memory climb under load. Key rule: cap in-flight work with a Semaphore at the edge, tryAcquire (no wait, a few ms at most), 503 with Retry-After at once, no queueing; size every limit by Little's law from the measured rate, rate × (normal latency + longest expected stall), with the arithmetic in a comment; count each limit's rejections and attribute every 503 to its limit before tuning; never Executors.newFixedThreadPool or newSingleThreadExecutor for work that can outrun it (unbounded queue): use ThreadPoolExecutor with an ArrayBlockingQueue and AbortPolicy and shed on RejectedExecutionException; Spring Framework 7: use @ConcurrencyLimit with policy = REJECT (the default BLOCK is a queue) and @EnableResilientMethods; one bound per dependency.
 metadata:
-  verified: 2026-10-18
+  verified: 2026-10-19
 ---
 
 # Overload protection
@@ -14,11 +14,12 @@ Every service eventually receives more work than it can finish in time: a traffi
 ## The rule
 
 1. Cap in-flight requests at the edge with a `Semaphore` taken by `tryAcquire()` (no wait, or a timeout of a few milliseconds at most) and answer `503` with `Retry-After` at once when it is full.
-2. Size every limit by Little's law from the measured peak, concurrency = throughput × latency plus headroom for bursts, and write that arithmetic in a comment next to the constant.
+2. Size every limit by Little's law from the rate measured at capacity, in flight = rate × (normal latency + the longest stall you expect), never from an estimate, and write that arithmetic in a comment next to the constant.
 3. Never hand work that can arrive faster than it is processed to `Executors.newFixedThreadPool` or `newSingleThreadExecutor`; build a `ThreadPoolExecutor` with an `ArrayBlockingQueue` of explicit capacity and `AbortPolicy`, and turn `RejectedExecutionException` into a fast rejection.
 4. In Spring Framework 7, enable `@EnableResilientMethods` and declare `@ConcurrencyLimit(limit = N, policy = ConcurrencyLimit.ThrottlePolicy.REJECT)` on methods behind a request (7.0.3+), mapping `InvocationRejectedException` to `503`.
 5. Give each dependency its own bound (a `Semaphore`, or its own connection pool) so one slow backend cannot take every slot in the process.
 6. Reject before doing expensive work: admission is the first thing a request does, and health checks are outside it.
+7. Make every limit's rejections countable (a counter per limit, or a sampled log line), and before changing any limit attribute each `503` of a load test to the limit that produced it.
 
 ## Why
 
@@ -26,7 +27,7 @@ Every service eventually receives more work than it can finish in time: a traffi
 
 With virtual threads this rule is no longer optional. The [Spring Boot reference](https://docs.spring.io/spring-boot/reference/features/spring-application.html) says that once `spring.threads.virtual.enabled=true`, "properties which configure thread pools don't have an effect anymore", so the Tomcat thread maximum that used to cap concurrency is gone, and the [Oracle virtual threads guide](https://docs.oracle.com/en/java/javase/25/core/virtual-threads.html) tells you to limit concurrency with a `Semaphore` instead (see `virtual-threads`).
 
-**Rule 2.** Little's law: the average number of requests in flight equals the arrival rate times the time each spends in the system. A replica that serves 400 req/s at 50 ms holds 20 in flight on average; two to three times that covers bursts and latency jitter. Take the rate from the peak the replica sustains in a load test, not from average traffic, and the latency from the p99 of the healthy service, not from the timeout. A limit below that number turns ordinary bursts into errors while CPU sits idle; a limit far above it admits work that will miss its deadline. The comment keeps the inputs visible, so when traffic or latency changes, the next person redoes the arithmetic instead of guessing a new round number.
+**Rule 2.** Little's law: the average number of requests in flight equals the arrival rate times the time each spends in the system. A replica that serves 400 req/s at 50 ms holds 20 in flight on average. The headroom is not a multiplier picked by feel: every stall (a GC pause, a JIT compilation, a second of saturated CPU) keeps admitting work at the full rate while nothing finishes, so it adds rate × stall. Size the limit as rate × (normal latency + longest expected stall): at 400 req/s, a 50 ms stall adds 20 more, so 40. Take the rate from the peak the replica sustains in a load test, not from average traffic or a design estimate, and the latency from the p99 of the healthy service, not from the timeout. Measured in benchmarks/orders-api (TUNING.md): a pricing bulkhead of 200 had been sized from an estimate of 30 quotes/s per replica; the measured rate at capacity was 900 quotes/s (2,700 pricing calls/s at 30 ms, about 80 in flight), each millisecond of stall added 2.7 calls, and 200 filled in bursts, losing 2-11% of requests at 5,000-6,000 req/s with CPU to spare. Re-sized to 512 (80 plus a 100 ms stall, rounded up) the errors at those rates went to 0-2.8%, with the slow-dependency scenario unchanged because the other bounds still held. A limit below the number turns ordinary bursts into errors while CPU sits idle; a limit far above it admits work that will miss its deadline. The comment keeps the inputs visible, so when traffic or latency changes, the next person redoes the arithmetic instead of guessing a new round number.
 
 **Rule 3.** The [`Executors.newFixedThreadPool`](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/Executors.html) documentation says its threads work "off a shared unbounded queue", and the [`ThreadPoolExecutor`](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/ThreadPoolExecutor.html) documentation warns that an unbounded queue "admits the possibility of unbounded work queue growth when commands continue to arrive on average faster than they can be processed". A bounded `ArrayBlockingQueue` with finite threads makes the executor reject when saturated, and the default `AbortPolicy` throws `RejectedExecutionException`, which the caller turns into a `503` or a negative acknowledgement to the message broker. Size the queue as the backlog you can finish within the callers' deadline: workers × deadline ÷ task time, not "large to be safe". Avoid `CallerRunsPolicy` on a request thread: it hides the rejection by running the task on the very thread that was supposed to answer quickly.
 
@@ -36,6 +37,8 @@ With virtual threads this rule is no longer optional. The [Spring Boot reference
 
 **Rule 6.** A rejected request is cheap only if nothing ran before the rejection: parsing a 2 MB body, opening a transaction or calling a dependency and then returning `503` wastes exactly the capacity the limit protects. A health check behind the limit fails exactly when the replica is busy, so the orchestrator restarts healthy pods when capacity is shortest; mount it outside.
 
+**Rule 7.** A service with an admission limit, a pool timeout and a per-dependency bulkhead answers `503` from three places, and a load test that only counts `503`s cannot tell which limit is too small, or whether any is. Measured in benchmarks/orders-api (TUNING.md): of about 18,800 `503`s, the logs showed 584 pool borrow timeouts and 12 bulkhead rejections; the admission filter logged nothing, so roughly 97% came from it, and it was full because requests waited behind 5 connections (`waiting=230`) on a replica at 200% CPU. Raising the admission limit would have admitted more work into the same queue; the fix was the CPU per request (one statement per read, see [`sql-and-transactions`](../sql-and-transactions/SKILL.md)), which emptied every queue at once. Give each limit a counter named after it (a Micrometer counter in Spring, a `LongAdder` in plain Java) or a sampled log line, and read them next to CPU and pool metrics before touching a number. The good example counts its admission rejections and checks the count.
+
 The cost: some requests get a `503` that a patient server might eventually have answered. That is the trade: a service that loses a fraction of its traffic during overload instead of all of it, and recovers when the trigger ends instead of working through a backlog nobody is waiting for.
 
 ## Good example
@@ -43,15 +46,20 @@ The cost: some requests get a `503` that a patient server might eventually have 
 See [`examples/good/`](examples/good/).
 
 ```java
-// Little's law: the replica peaks at 40 req/s and a request takes 50 ms, so
-// 40 × 0.05 = 2 requests are in flight on average; 4 doubles that for bursts.
-// Above 4 in flight the replica is overloaded, and the excess is rejected at once.
+// Little's law, from the load test, not an estimate: the replica peaks at 40 req/s
+// and a request takes 50 ms, so 40 × 0.05 = 2 are in flight on average; the longest
+// stall we expect (a GC pause, JIT, a CPU-saturated moment) is 50 ms and adds
+// 40 × 0.05 = 2 more. 40 × (0.05 + 0.05) = 4; above that the excess is rejected at once.
 static final int MAX_IN_FLIGHT = 4;
 static final Semaphore admission = new Semaphore(MAX_IN_FLIGHT);
+// Every limit counts its rejections (export it as a metric), so a load test can tell
+// which limit produced each 503.
+static final LongAdder admissionRejected = new LongAdder();
 ```
 
 ```java
 if (!admission.tryAcquire()) {
+    admissionRejected.increment();
     exchange.getResponseHeaders().set("Retry-After", "1");
     exchange.sendResponseHeaders(503, -1); // costs microseconds, holds nothing
     return;
@@ -66,7 +74,7 @@ var executor = new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS,
         new ArrayBlockingQueue<>(10), new ThreadPoolExecutor.AbortPolicy());
 ```
 
-The example runs a real `HttpServer` on virtual threads, fills every slot with requests stuck on a slow dependency, and checks that 50 more requests all get `503` with `Retry-After` while the admitted ones are still blocked, that the admitted ones succeed once the dependency recovers, and that no permit leaks. It then submits 100 blocked tasks to the bounded executor and checks that exactly 2 run, 10 wait and 88 are rejected. No check depends on timing.
+The example runs a real `HttpServer` on virtual threads, fills every slot with requests stuck on a slow dependency, and checks that 50 more requests all get `503` with `Retry-After` while the admitted ones are still blocked and that the admission counter saw exactly 50, that the admitted ones succeed once the dependency recovers, and that no permit leaks. It then submits 100 blocked tasks to the bounded executor and checks that exactly 2 run, 10 wait and 88 are rejected. No check depends on timing.
 
 ## Bad example
 
@@ -86,7 +94,7 @@ static final ExecutorService REQUESTS = Executors.newFixedThreadPool(200);
 IN_FLIGHT.acquireUninterruptibly();
 ```
 
-Both look responsible in review: there is a pool size and there is a limit. Under overload they are two queues in a row, one unbounded, and the guessed `new Semaphore(100)` has no arithmetic to say whether it is too high or too low. The Spring equivalent of the second mistake is `@ConcurrencyLimit(10)` without `policy = REJECT`.
+Both look responsible in review: there is a pool size and there is a limit. Under overload they are two queues in a row, one unbounded, and the guessed `new Semaphore(100)` has no arithmetic to say whether it is too high or too low and counts nothing when it rejects. The Spring equivalent of the second mistake is `@ConcurrencyLimit(10)` without `policy = REJECT`.
 
 ## Checklist
 
@@ -94,7 +102,8 @@ When reviewing code under this skill, confirm:
 
 - [ ] The request edge caps in-flight work with `tryAcquire()` (no wait or a few milliseconds), and a full limit answers `503` with `Retry-After` at once.
 - [ ] No semaphore, pool or limiter in the request path is acquired with `acquire()`, `acquireUninterruptibly()` or a timeout close to the request deadline.
-- [ ] Every limit constant has its Little's-law arithmetic (peak rate × latency, plus headroom) in a comment, or comes from configuration with that comment.
+- [ ] Every limit constant has its Little's-law arithmetic (measured rate × (latency + longest stall)) in a comment, or comes from configuration with that comment.
+- [ ] Every limit's rejections are countable (a counter or sampled log per limit), and a tuning change names which limit produced the `503`s it addresses.
 - [ ] No `Executors.newFixedThreadPool`, `newSingleThreadExecutor` or `LinkedBlockingQueue` without capacity receives work that can arrive faster than it is processed.
 - [ ] Every `ThreadPoolExecutor` has a bounded queue and a rejection policy that surfaces the rejection (not `CallerRunsPolicy` on a request thread, not `DiscardPolicy`).
 - [ ] `@ConcurrencyLimit` on a request path uses `policy = ConcurrencyLimit.ThrottlePolicy.REJECT`, `@EnableResilientMethods` is present, and `InvocationRejectedException` maps to `503`.

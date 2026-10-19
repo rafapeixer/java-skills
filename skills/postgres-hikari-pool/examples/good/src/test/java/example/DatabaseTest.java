@@ -38,9 +38,14 @@ class DatabaseTest {
     }
 
     @Test
-    void poolSizeIsTheBudgetDividedByPeakReplicas() {
-        assertEquals(25, Database.poolSize(200, 6 + 2));
-        assertThrows(IllegalArgumentException.class, () -> Database.poolSize(10, 8));
+    void poolSizeIsTheBudgetDividedByPeakPods() {
+        // 80 connections, 8 replicas, the default 25% maxSurge: 80 / (8 + 2) = 8, not 80 / 16 = 5.
+        assertEquals(8, Database.poolSize(80, 8, 25));
+        // A Deployment with maxSurge: 100% does double during a deploy.
+        assertEquals(5, Database.poolSize(80, 8, 100));
+        // ceil(25% of 6) = 2 surge pods: 200 / 8 = 25.
+        assertEquals(25, Database.poolSize(200, 6, 25));
+        assertThrows(IllegalArgumentException.class, () -> Database.poolSize(10, 8, 25));
     }
 
     @Test
@@ -83,7 +88,7 @@ class DatabaseTest {
         }
         HikariConfig config = new Binder(new MapConfigurationPropertySource(props))
                 .bind("spring.datasource.hikari", Bindable.ofInstance(new HikariConfig())).get();
-        assertEquals(25, config.getMaximumPoolSize());
+        assertEquals(8, config.getMaximumPoolSize());
         assertEquals(-1, config.getMinimumIdle());
         assertEquals(500, config.getConnectionTimeout());
         assertEquals("orders-api", config.getDataSourceProperties().getProperty("ApplicationName"));

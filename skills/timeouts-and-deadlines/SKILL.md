@@ -1,8 +1,8 @@
 ---
 name: timeouts-and-deadlines
-description: Use when adding a timeout to a Java call, writing code that blocks (HttpClient.send, Future.get, CompletableFuture.join, JDBC executeQuery, BlockingQueue, locks), seeing a request hang or threads pile up behind a slow dependency, or deciding how long a downstream call may take inside a request. Key rule: every blocking call has a bound, and the bound comes from the request's deadline, not a constant; create one Deadline at the edge (System.nanoTime + budget), pass it down, and give each call min(its cap, remaining time), failing before the call when nothing is left. HttpClient needs connectTimeout on the client and HttpRequest.timeout per request (it covers the response body only on JDK 26+, so on JDK 25 bound sendAsync with Future.get(timeout) and cancel(true) on timeout); JDBC needs setQueryTimeout in whole seconds rounded up (0 means no limit); never Future.get() without a timeout; never retry past the deadline.
+description: Use when adding a timeout to a Java call, writing blocking code (HttpClient.send, Future.get, join, JDBC, BlockingQueue, locks), seeing requests hang behind a slow dependency, or deciding how long a downstream call may take. Key rule: every blocking call has a bound, and the bound comes from the request's deadline, not a constant; create one Deadline at the edge (System.nanoTime + budget), pass it down, and give each call min(its cap, remaining time), failing before the call when nothing is left. HttpClient needs connectTimeout on the client and HttpRequest.timeout per request (body covered only on JDK 26+; on JDK 25 use sendAsync + Future.get(timeout), cancel(true) on timeout); PostgreSQL: server-side statement_timeout (role or pgJDBC options) over @Transactional(timeout)/setQueryTimeout per statement, which arms a driver timer each time; a per-call JDBC timeout rounds up to whole seconds (0 = no limit); never Future.get() without a timeout; never retry past the deadline.
 metadata:
-  verified: 2026-10-18
+  verified: 2026-10-19
 ---
 
 # Timeouts and deadlines
@@ -13,13 +13,13 @@ Every request a Java service answers has a point after which the answer is usele
 
 ## The rule
 
-1. Give every blocking call an explicit bound: no `HttpRequest` without `timeout`, no `HttpClient` without `connectTimeout`, no `Future.get()` or `join()` without a timeout, no JDBC statement without `setQueryTimeout`.
+1. Give every blocking call an explicit bound: no `HttpRequest` without `timeout`, no `HttpClient` without `connectTimeout`, no `Future.get()` or `join()` without a timeout, no SQL statement without a statement timeout.
 2. Create one deadline per request at the edge (`System.nanoTime()` plus the budget) and pass it to every method that makes a blocking call.
 3. Compute each call's timeout as the smaller of that call's own cap and the time left on the deadline, so the budget shrinks as the request proceeds.
 4. When the time left is below what any call can use, throw a deadline exception before sending the call.
 5. On JDK 25, bound an HTTP call's body as well as its headers: send with `sendAsync` and wait with `Future.get(timeout)`, because `HttpRequest.timeout` stops once headers arrive before JDK 26.
 6. When a `Future.get(timeout)` times out, call `cancel(true)` on the future so the work stops instead of running on unobserved.
-7. Convert the remaining time to JDBC whole seconds by rounding up and never pass 0, which means no limit.
+7. With PostgreSQL, bound every statement with a server-side `statement_timeout` (on the role or in pgJDBC's `options`) instead of `@Transactional(timeout)` or `setQueryTimeout` on each statement, and when a query needs the shorter remaining deadline, pass it in whole seconds rounded up, never 0, which means no limit.
 8. Never retry after the deadline has passed, and give a retry only the time that is left, never a fresh full timeout.
 
 ## Why
@@ -36,7 +36,7 @@ Every request a Java service answers has a point after which the answer is usele
 
 **Rule 6.** `Future.get(timeout)` stops your wait, not the work. Without `cancel(true)`, the HTTP exchange or task keeps running and keeps its connection. For futures from `HttpClient.sendAsync`, the [javadoc](https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpClient.html) says `cancel(true)` "attempts to cancel the HTTP exchange in an effort to release underlying resources as soon as possible" (with HTTP/1.1 it may close the connection). For an `ExecutorService` task, `cancel(true)` interrupts the thread running it; that only helps if the task responds to interrupts (see `exceptions`).
 
-**Rule 7.** `setQueryTimeout` takes `int` seconds and "zero means there is no limit". Integer division turns 800 ms into 0, which silently removes the bound exactly when the budget is nearly spent. Round up, minimum 1. The limit is enforced by the driver; pgJDBC sends a cancel request over a separate connection, bounded by `cancelSignalTimeout` (default 10 s, [pgJDBC docs](https://jdbc.postgresql.org/documentation/use/)). In Spring, `JdbcTemplate` applies the current transaction's timeout to each statement ([`DataSourceUtils.applyTimeout`](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/jdbc/datasource/DataSourceUtils.html)), so `@Transactional(timeout = 2)` bounds every query in the transaction. Waiting for a pooled connection is a blocking call too: HikariCP's `connectionTimeout` defaults to 30 s ([HikariCP](https://github.com/brettwooldridge/HikariCP)), which is far longer than most request budgets.
+**Rule 7.** PostgreSQL's `statement_timeout` aborts "any statement that takes more than the specified amount of time", measured "from the time a command arrives at the server until it is completed" ([Client Connection Defaults](https://www.postgresql.org/docs/current/runtime-config-client.html)); set on the role (`ALTER ROLE ... SET`) or per pool in pgJDBC's `options` (`-c statement_timeout=5000`), it bounds every statement the service sends with no work in the driver. The JDBC route costs CPU on every statement: `setQueryTimeout` makes pgJDBC schedule a cancel timer task per execution, and Spring turns a transaction timeout into exactly that, since `JdbcTemplate` applies the current transaction's timeout to each statement ([`DataSourceUtils.applyTimeout`](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/jdbc/datasource/DataSourceUtils.html)). Measured in benchmarks/orders-api (TUNING.md): with `@Transactional(timeout = 2)` on every query, `PgConnection.addTimerTask` (from `PgStatement.startTimer`) was the top Java method in JFR at 6.1% of samples; removing it lost no protection because `statement_timeout` and `socketTimeout` were already set. Keep a bound either way. When the request's remaining deadline is shorter than the server bound and a query must stop with it, `setQueryTimeout` takes `int` seconds and "zero means there is no limit": integer division turns 800 ms into 0, which silently removes the bound exactly when the budget is nearly spent. Round up, minimum 1. pgJDBC enforces it by sending a cancel request over a separate connection, bounded by `cancelSignalTimeout` (default 10 s, [pgJDBC docs](https://jdbc.postgresql.org/documentation/use/)). Waiting for a pooled connection is a blocking call too: HikariCP's `connectionTimeout` defaults to 30 s ([HikariCP](https://github.com/brettwooldridge/HikariCP)), which is far longer than most request budgets.
 
 **Rule 8.** The bad example retries a timed-out call with a fresh 5 s timeout and without cancelling the first: the request now has two calls in flight and a budget it no longer respects. A retry that takes `deadline.timeoutFor(...)` gets what is left, and gets an exception instead when nothing is.
 
@@ -69,6 +69,10 @@ try {
 ```
 
 ```java
+// With PostgreSQL the everyday bound is server-side: statement_timeout on the role or in
+// pgJDBC's options (-c statement_timeout=5000) covers every statement at no driver cost.
+// A per-statement query timeout arms a driver timer each time, so use it only where the
+// request's remaining deadline must cut a query shorter than that server bound.
 ps.setQueryTimeout(deadline.queryTimeoutSeconds("count orders", Duration.ofSeconds(2)));
 ```
 
@@ -98,7 +102,7 @@ HttpRequest request = HttpRequest.newBuilder(URI.create("http://stock.internal/s
             ps.setQueryTimeout((int) (remainingMillis / 1000));
 ```
 
-The file also sends a request with no timeout at all, waits on `Future.get()` with no bound, retries a timed-out call with a fresh timeout without cancelling the first, and runs a query with no query timeout. It compiles and works while every dependency is healthy.
+The file also sends a request with no timeout at all, waits on `Future.get()` with no bound, retries a timed-out call with a fresh timeout without cancelling the first, and runs a query with no statement timeout of any kind. It compiles and works while every dependency is healthy.
 
 ## Checklist
 
@@ -110,7 +114,7 @@ When reviewing code under this skill, confirm:
 - [ ] Each call's timeout is `min(cap, remaining)`, and a spent deadline throws before the call is sent.
 - [ ] On JDK 25 code paths, response bodies are bounded too (`sendAsync` plus `get(timeout)`), not only headers.
 - [ ] Every timed-out future is cancelled with `cancel(true)`.
-- [ ] Every JDBC statement has `setQueryTimeout` (or a Spring transaction timeout), computed by rounding up, never 0.
+- [ ] Every SQL statement is bounded: with PostgreSQL by `statement_timeout` on the role or in pgJDBC `options` (no `@Transactional(timeout)` adding a driver timer per statement); a per-statement `setQueryTimeout` is rounded up, never 0.
 - [ ] Retries use the remaining deadline and stop when it is spent.
 - [ ] Timeout errors name the operation and the timeout that fired.
 

@@ -6,12 +6,15 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import java.io.InputStream;
 import java.net.Socket;
 import java.time.Duration;
+import org.apache.coyote.AbstractProtocol;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureRestTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.boot.tomcat.TomcatWebServer;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
@@ -28,6 +31,15 @@ class OrdersApplicationTest {
 
     @LocalServerPort
     int port;
+
+    @Autowired
+    WebServerApplicationContext context;
+
+    @Test
+    void acceptBacklogIsRaisedFromTheDefault100() {
+        var connector = ((TomcatWebServer) context.getWebServer()).getTomcat().getConnector();
+        assertEquals(1024, ((AbstractProtocol<?>) connector.getProtocolHandler()).getAcceptCount());
+    }
 
     @Test
     void oversizedBodyIsRejectedAsProblemJson() {

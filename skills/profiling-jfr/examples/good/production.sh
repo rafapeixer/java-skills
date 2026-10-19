@@ -21,7 +21,11 @@ jfr view hot-methods /tmp/incident.jfr
 jfr view allocation-by-site /tmp/incident.jfr
 jfr view contention-by-site /tmp/incident.jfr
 jfr view pinned-threads /tmp/incident.jfr
+jfr view gc-pauses /tmp/incident.jfr
+jfr print --events jdk.GCHeapConfiguration /tmp/incident.jfr
 jfr print --events jdk.VirtualThreadPinned --stack-depth 20 /tmp/incident.jfr
 
 # 5. JDK 25+ on Linux: CPU-time sampling (experimental, JEP 509), off in default.jfc.
+#    Unlike jdk.ExecutionSample it also sees native frames (socket writes, syscalls).
 jcmd "$pid" JFR.start name=cpu settings=default jdk.CPUTimeSample#enabled=true duration=2m filename=/tmp/cpu.jfr
+jfr view cpu-time-hot-methods /tmp/cpu.jfr

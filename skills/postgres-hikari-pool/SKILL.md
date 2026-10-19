@@ -1,8 +1,8 @@
 ---
 name: postgres-hikari-pool
-description: Use when configuring a PostgreSQL connection pool in Java (HikariCP or spring.datasource.hikari in Spring Boot), sizing maximumPoolSize for several replicas, adopting virtual threads, putting PgBouncer or a proxy in front of Postgres, or seeing "too many clients" or "Connection is not available, request timed out". Key rule: maximumPoolSize = connection budget / (max replicas + deploy surge), never the default 10 unchecked nor one per thread; leave minimumIdle unset (fixed-size pool); maxLifetime ~30 s shorter than any database, PgBouncer or load balancer limit, keepaliveTime 2 min; connectionTimeout of a few hundred ms so a full pool fails fast as 503; with virtual threads the pool bounds concurrency; HikariCP 7.1+ and pgJDBC 42.7.14+ (override Spring Boot 4.1.1's managed versions); pgJDBC ApplicationName, reWriteBatchedInserts, tcpKeepAlive, socketTimeout; prepareThreshold=0 only behind a pooler without prepared statements.
+description: Use when configuring a PostgreSQL connection pool in Java (HikariCP or spring.datasource.hikari in Spring Boot), sizing maximumPoolSize for several replicas, adopting virtual threads, putting PgBouncer or a proxy in front of Postgres, or seeing "too many clients" or "Connection is not available, request timed out". Key rule: maximumPoolSize = connection budget / (max replicas + ceil(maxSurge, Kubernetes default 25%)), e.g. 80 / (8 + 2) = 8, not 80 / (8 + 8), never the default 10 unchecked nor one per thread; leave minimumIdle unset (fixed-size pool); maxLifetime ~30 s shorter than any database, PgBouncer or load balancer limit, keepaliveTime 2 min; connectionTimeout of a few hundred ms so a full pool fails fast as 503; with virtual threads the pool bounds concurrency; HikariCP 7.1+ and pgJDBC 42.7.14+ (override Spring Boot 4.1.1's managed versions); pgJDBC ApplicationName, reWriteBatchedInserts, tcpKeepAlive, socketTimeout; prepareThreshold=0 only behind a pooler without prepared statements.
 metadata:
-  verified: 2026-10-18
+  verified: 2026-10-19
 ---
 
 # PostgreSQL pool with HikariCP
@@ -14,7 +14,7 @@ A Java service reaches PostgreSQL through one HikariCP pool (Spring Boot picks H
 ## The rule
 
 1. Use HikariCP 7.1+ and pgJDBC 42.7.14+, and in a Spring Boot 4.1.1 build set the `hikaricp.version` and `postgresql.version` properties, because the Boot BOM resolves 7.0.2 and 42.7.13.
-2. Set `maximumPoolSize` to the service's connection budget divided by the most pods that can run at once (autoscaler maximum plus rolling-deploy surge), never the default 10 unchecked and never one connection per request thread.
+2. Set `maximumPoolSize` to the service's connection budget divided by the most pods that can run at once, the autoscaler maximum plus your Deployment's `maxSurge` rounded up (25% by default, not 100%), never the default 10 unchecked and never one connection per request thread.
 3. Leave `minimumIdle` unset so the pool is fixed-size.
 4. Set `maxLifetime` about 30 seconds shorter than the shortest connection limit imposed by PostgreSQL, PgBouncer, a proxy or a load balancer, and keep `keepaliveTime` at two minutes with pgJDBC `tcpKeepAlive=true`.
 5. Set `connectionTimeout` to a few hundred milliseconds, well under the request deadline, and answer 503 when `getConnection` throws `SQLTransientConnectionException`.
@@ -26,7 +26,7 @@ A Java service reaches PostgreSQL through one HikariCP pool (Spring Boot picks H
 
 **Rule 1.** HikariCP 7.1.0 is the current release for Java 11+ ([README](https://github.com/brettwooldridge/HikariCP)). pgJDBC 42.7.14 (2026-10-07) is a security release: CVE-2026-107314, where 42.7.11 to 42.7.13 ignored a `requireAuth` that excludes every method and accepted any authentication the server asked for, including cleartext password; and CVE-2026-107315, where 42.7.4 to 42.7.13 padded short values with bytes from earlier messages on the same connection, so stored data could contain SQL text and parameters of other statements ([release notes](https://jdbc.postgresql.org/changelogs/2026-10-07-42.7.14-release/)). Spring Boot 4.1.1's dependency management pins `hikaricp.version` 7.0.2 and `postgresql.version` 42.7.13, so a Boot service that only adds `org.postgresql:postgresql` without a version runs the vulnerable driver. Override the two properties in the POM (or the Gradle equivalent) until a Boot release manages them.
 
-**Rule 2.** The pool is the only thing between your fleet and `max_connections` (100 by default). The budget is what the database owner gives this service after `superuser_reserved_connections`, admin sessions, migrations and other services. Divide it by the peak pod count, not today's: during a rolling update the new pods open their pools before the old ones close, and the autoscaler can add pods during the same deploy. The HikariCP default of 10 is not a budget: 30 pods with the default open 300 connections. One connection per thread is worse. HikariCP's [About Pool Sizing](https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing) gives `connections = ((core_count * 2) + effective_spindle_count)` as the starting point for the database server (9 or 10 for a 4-core server) and says "You want a small pool of a few dozen connections at most", with the remaining threads waiting for a connection. So the budget itself should be in the range of a few connections per database core across the whole fleet; a bigger pool moves the queue into PostgreSQL, where every waiting query is a process competing for CPU and locks. If the arithmetic gives fewer than two connections per pod, add PgBouncer instead of shrinking further; the good example's `poolSize` refuses that case.
+**Rule 2.** The pool is the only thing between your fleet and `max_connections` (100 by default). The budget is what the database owner gives this service after `superuser_reserved_connections`, admin sessions, migrations and other services. Divide it by the peak pod count, not today's: during a rolling update the new pods open their pools before the old ones close, and the autoscaler can add pods during the same deploy. The surge is your Deployment's `maxSurge`, which Kubernetes "calculated from the percentage by rounding up. The default value is 25%" ([Deployments](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#max-surge)): 8 replicas run at most 8 + 2 = 10 pods, not 16. Doubling the replicas "to be safe" is not safe, it moves the queue into the pool. Measured in benchmarks/orders-api (TUNING.md): with 80 connections for 8 replicas, 80 / (8 + 8) = 5 left the pool as the queue (Hikari reported `total=5, active=5, idle=0, waiting=230`), and 80 / (8 + 2) = 8 cut the errors of a 4,000 req/s spike from 21% to 9.5% with peak `pg_stat_activity` still inside the budget. Write the arithmetic next to the setting. The HikariCP default of 10 is not a budget: 30 pods with the default open 300 connections. One connection per thread is worse. HikariCP's [About Pool Sizing](https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing) gives `connections = ((core_count * 2) + effective_spindle_count)` as the starting point for the database server (9 or 10 for a 4-core server) and says "You want a small pool of a few dozen connections at most", with the remaining threads waiting for a connection. So the budget itself should be in the range of a few connections per database core across the whole fleet; a bigger pool moves the queue into PostgreSQL, where every waiting query is a process competing for CPU and locks. If the arithmetic gives fewer than two connections per pod, add PgBouncer instead of shrinking further; the good example's `poolSize` refuses that case.
 
 **Rule 3.** `minimumIdle` defaults to `maximumPoolSize`, and HikariCP recommends "not setting this value and instead allowing HikariCP to act as a fixed size connection pool". With `minimumIdle` below the maximum the pool closes connections after `idleTimeout` (10 minutes) and has to open them again during the next burst, when the database is busiest and each new connection costs a fork, TLS and authentication. A fixed pool also makes the fleet's connection count a constant you can check against the budget.
 
@@ -47,8 +47,10 @@ The cost: a fixed share per pod means one pod cannot burst past it even when the
 See [`examples/good/`](examples/good/).
 
 ```java
-    public static int poolSize(int connectionBudget, int peakReplicas) {
-        int size = connectionBudget / peakReplicas;
+    public static int poolSize(int connectionBudget, int maxReplicas, int maxSurgePercent) {
+        int surge = Math.ceilDiv(maxReplicas * maxSurgePercent, 100);
+        int peakPods = maxReplicas + surge;
+        int size = connectionBudget / peakPods;
 ```
 
 ```java
@@ -67,7 +69,9 @@ See [`examples/good/`](examples/good/).
 The same pool in Spring Boot, bound by a test with Boot's own `Binder` so the property names are checked:
 
 ```properties
-spring.datasource.hikari.maximum-pool-size=25
+# most 8 replicas; the Deployment's maxSurge is the default 25%, rounded up to 2
+# pods: 80 / (8 + 2) = 8 per pod.
+spring.datasource.hikari.maximum-pool-size=8
 # minimum-idle is left unset: a fixed-size pool.
 # 30 s below the proxy's 30-minute connection limit.
 spring.datasource.hikari.max-lifetime=1770000
@@ -82,7 +86,7 @@ spring.datasource.hikari.data-source-properties.reWriteBatchedInserts=true
 <postgresql.version>42.7.14</postgresql.version>
 ```
 
-`DatabaseTest` starts `postgres:17` with Testcontainers and proves the behavior instead of trusting the settings: the pool size comes from the budget, a full pool caps what `pg_stat_activity` sees and fails the next borrow in well under two seconds, 200 virtual threads share at most four backends, the Boot properties bind to the same values, and the driver on the classpath is 42.7.14.
+`DatabaseTest` starts `postgres:17` with Testcontainers and proves the behavior instead of trusting the settings: the pool size comes from the budget and the surge (`poolSize(80, 8, 25)` is 8), a full pool caps what `pg_stat_activity` sees and fails the next borrow in well under two seconds, 200 virtual threads share at most four backends, the Boot properties bind to the same values, and the driver on the classpath is 42.7.14.
 
 ## Bad example
 
@@ -113,7 +117,7 @@ The example also disables `keepaliveTime`, sets `prepareThreshold=0` on a direct
 When reviewing code under this skill, confirm:
 
 - [ ] The resolved versions are HikariCP 7.1+ and pgJDBC 42.7.14+ (`mvn dependency:tree`), with the Boot BOM properties overridden where needed.
-- [ ] `maximumPoolSize` is set explicitly and documented as budget / (max replicas + surge), and the fleet total fits the database's budget for this service.
+- [ ] `maximumPoolSize` is set explicitly and documented as budget / (max replicas + ceil(maxSurge)), with the surge taken from the Deployment (25% by default), and the fleet total fits the database's budget for this service.
 - [ ] `minimumIdle` is not set (or equals `maximumPoolSize`).
 - [ ] `maxLifetime` is set and shorter, by tens of seconds, than every database, PgBouncer, proxy and load balancer connection limit on the path.
 - [ ] `keepaliveTime` is positive and below `maxLifetime`, and `tcpKeepAlive=true` is set.

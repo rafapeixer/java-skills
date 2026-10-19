@@ -47,6 +47,10 @@ public class Main {
         }
     }
 
+    // With PostgreSQL the everyday bound is server-side: statement_timeout on the role or in
+    // pgJDBC's options (-c statement_timeout=5000) covers every statement at no driver cost.
+    // A per-statement query timeout arms a driver timer each time, so use it only where the
+    // request's remaining deadline must cut a query shorter than that server bound.
     static long countOrders(Connection c, long customerId, Deadline deadline) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("select count(*) from orders where customer_id = ?")) {
             ps.setQueryTimeout(deadline.queryTimeoutSeconds("count orders", Duration.ofSeconds(2)));

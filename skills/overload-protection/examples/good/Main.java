@@ -8,12 +8,17 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.LongAdder;
 
-// Little's law: the replica peaks at 40 req/s and a request takes 50 ms, so
-// 40 × 0.05 = 2 requests are in flight on average; 4 doubles that for bursts.
-// Above 4 in flight the replica is overloaded, and the excess is rejected at once.
+// Little's law, from the load test, not an estimate: the replica peaks at 40 req/s
+// and a request takes 50 ms, so 40 × 0.05 = 2 are in flight on average; the longest
+// stall we expect (a GC pause, JIT, a CPU-saturated moment) is 50 ms and adds
+// 40 × 0.05 = 2 more. 40 × (0.05 + 0.05) = 4; above that the excess is rejected at once.
 static final int MAX_IN_FLIGHT = 4;
 static final Semaphore admission = new Semaphore(MAX_IN_FLIGHT);
+// Every limit counts its rejections (export it as a metric), so a load test can tell
+// which limit produced each 503.
+static final LongAdder admissionRejected = new LongAdder();
 
 static final CountDownLatch admitted = new CountDownLatch(MAX_IN_FLIGHT);
 static final CountDownLatch slowDependency = new CountDownLatch(1);
@@ -47,6 +52,7 @@ void main() throws Exception {
             check(r.headers().firstValue("Retry-After").equals(java.util.Optional.of("1")), "no Retry-After");
         }
         check(stuck.stream().noneMatch(CompletableFuture::isDone), "rejections waited for a slot");
+        check(admissionRejected.sum() == 50, "admission rejections counted: " + admissionRejected.sum());
 
         // The dependency recovers: admitted requests finish and the permits come back.
         slowDependency.countDown();
@@ -65,6 +71,7 @@ void main() throws Exception {
 static void handle(HttpExchange exchange) throws java.io.IOException {
     try (exchange) {
         if (!admission.tryAcquire()) {
+            admissionRejected.increment();
             exchange.getResponseHeaders().set("Retry-After", "1");
             exchange.sendResponseHeaders(503, -1); // costs microseconds, holds nothing
             return;

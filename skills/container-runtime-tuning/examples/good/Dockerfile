@@ -10,9 +10,11 @@ USER 10001
 
 # Heap = 75% of the container memory limit. The other 25% is for metaspace, the code
 # cache (240 MB reserved), 1 MB of stack per platform thread and direct buffers.
+# Initial = max: the container's memory is fixed, so G1 starts at full size instead of
+# at 1.5625% (16 MB of 1 GiB) and resizing it with long pauses under load.
 # G1 by name: on JDK 25 a container with 1 CPU or less than 1792 MB silently gets Serial.
 # No -Xmx: it would ignore the limit and drift from it on the next resize.
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+UseG1GC"
+ENV JAVA_TOOL_OPTIONS="-XX:InitialRAMPercentage=75 -XX:MaxRAMPercentage=75 -XX:+UseG1GC"
 
 # Exec form: java is PID 1 and receives SIGTERM, so graceful shutdown runs.
 ENTRYPOINT ["java", "-jar", "app.jar"]

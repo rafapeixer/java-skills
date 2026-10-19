@@ -10,12 +10,16 @@ public final class Database {
 
     /**
      * The pool size is this service's share of max_connections divided by the most
-     * pods that can run at once: the autoscaler maximum plus the rolling-deploy surge.
+     * pods that can run at once: the autoscaler maximum plus the rolling-update surge.
+     * Kubernetes rounds maxSurge up from a percentage and defaults it to 25%, so
+     * 8 replicas run at most 8 + 2 = 10 pods during a deploy, not 16.
      */
-    public static int poolSize(int connectionBudget, int peakReplicas) {
-        int size = connectionBudget / peakReplicas;
+    public static int poolSize(int connectionBudget, int maxReplicas, int maxSurgePercent) {
+        int surge = Math.ceilDiv(maxReplicas * maxSurgePercent, 100);
+        int peakPods = maxReplicas + surge;
+        int size = connectionBudget / peakPods;
         if (size < 2) {
-            throw new IllegalArgumentException("budget " + connectionBudget + " for " + peakReplicas
+            throw new IllegalArgumentException("budget " + connectionBudget + " for " + peakPods
                     + " pods leaves under 2 connections each; add a pooler or raise the budget");
         }
         return size;
