@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- Used only for dependency management: Spring Boot 4.1.1 manages Jackson 3.1.5 (the 3.1 LTS line). -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.1</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>example</groupId>
+  <artifactId>json-jackson3-good</artifactId>
+  <version>1.0.0</version>
+
+  <properties>
+    <java.version>25</java.version>
+    <maven.compiler.release>25</maven.compiler.release>
+  </properties>
+
+  <dependencies>
+    <!-- Jackson 3: groupId tools.jackson.core; jackson-annotations stays com.fasterxml.jackson.core. -->
+    <dependency>
+      <groupId>tools.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
