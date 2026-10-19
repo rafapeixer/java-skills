@@ -1,0 +1,10 @@
+{
+  "name": "java-skills",
+  "version": "0.1.0",
+  "description": "Opinionated skills that teach coding agents to write current, secure, low-resource Java for backend services.",
+  "author": { "name": "Rafael Peixer", "url": "https://github.com/rafapeixer" },
+  "homepage": "https://github.com/rafapeixer/java-skills",
+  "repository": "https://github.com/rafapeixer/java-skills",
+  "license": "MIT",
+  "keywords": ["java", "jdk", "spring-boot", "virtual-threads", "hikaricp", "postgres", "performance", "security"]
+}

@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/validate.sh
+
+  examples:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The floor (newest LTS) and the newest release.
+        jdk: ["25", "27"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run examples in the Maven + Temurin image
+        run: JDK_VERSIONS=${{ matrix.jdk }} bash scripts/test-examples.sh

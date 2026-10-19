@@ -1,0 +1,12 @@
+{
+  "name": "java-skills",
+  "owner": { "name": "Rafael Peixer", "url": "https://github.com/rafapeixer" },
+  "description": "Opinionated Java skills for coding agents: one design decision per skill.",
+  "plugins": [
+    {
+      "name": "java-skills",
+      "source": "./",
+      "description": "Opinionated skills that teach coding agents to write current, secure, low-resource Java for backend services."
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# Local agent settings
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Java / Maven
+target/
+*.class
+*.jar
+*.aot
+*.jfr
+hs_err_pid*
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Eval and benchmark output
+evals/results/
+benchmarks/**/results/
+*.log
